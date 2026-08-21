@@ -1,0 +1,17 @@
+[Unit]
+Description=Configure the rootless Arch Linux ARM OCI build image
+Wants=systemd-networkd.service systemd-resolved.service systemd-networkd-wait-online.service
+After=local-fs.target systemd-udev-trigger.service systemd-networkd.service systemd-resolved.service systemd-networkd-wait-online.service
+RequiresMountsFor=/boot/efi
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/archlinuxarm-oci-builder/build-entrypoint.sh {{ADMIN_USER}}
+StandardInput=tty-force
+StandardOutput=tty
+StandardError=tty
+TTYPath=/dev/ttyAMA0
+TTYReset=yes
+TTYVHangup=yes
+TimeoutStartSec=infinity
+

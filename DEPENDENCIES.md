@@ -1,36 +1,54 @@
 # Host dependencies
 
-`build.py` has no third-party Python dependencies. `requirements.txt` is intentionally empty except for comments.
+The production builder is fully rootless. It does not use host loop devices,
+mounts, chroot, `binfmt_misc`, or `sudo`.
 
-The easiest route is:
+Run:
 
 ```bash
 ./install-deps.sh
 ```
 
-The installer checks the package database first and passes only **missing** package names to the package manager. On Arch/CachyOS it uses `pacman -Q` plus `pacman -S --needed`; on Debian/Ubuntu it uses `dpkg-query` and `apt-get install`.
+The installer queries the package database and passes only missing package
+names to pacman or apt.
 
 ## Arch / CachyOS
 
-Equivalent package set:
-
 ```bash
-sudo pacman -S --needed python qemu-img qemu-user-static qemu-user-static-binfmt libarchive gptfdisk dosfstools e2fsprogs curl gnupg util-linux systemd
+sudo pacman -S --needed python qemu-img qemu-system-aarch64 edk2-aarch64 libguestfs curl gnupg
 ```
 
 ## Debian / Ubuntu
 
-Equivalent package set on releases where `qemu-user-static` is a concrete package:
-
 ```bash
 sudo apt-get update
-sudo apt-get install python3 qemu-utils qemu-user-static binfmt-support libarchive-tools gdisk dosfstools e2fsprogs curl gnupg util-linux systemd udev
+sudo apt-get install python3 qemu-utils qemu-system-arm qemu-efi-aarch64 libguestfs-tools curl gnupg
 ```
 
-If a newer Debian/Ubuntu release exposes `qemu-user-static` only as a virtual package, install the provider that registers AArch64 with `binfmt_misc` (typically `qemu-user-binfmt`) and verify that `/proc/sys/fs/binfmt_misc/qemu-aarch64` exists after restarting `systemd-binfmt.service`.
+## Required commands
 
-## Commands the builder requires
+- `qemu-system-aarch64`: runs the disposable ARM build VM and UEFI smoke test.
+- `qemu-img`: creates, overlays, validates, and converts disk images.
+- `guestfish`: partitions, formats, and imports files without host mounts/root.
+- `gpg`: verifies the official rootfs against the pinned signing fingerprint.
+- `curl`: downloads the official rootfs and detached signature.
+- Python 3.11 or newer: runs the standard-library-only orchestrator.
 
-`blkid`, `bsdtar`, `chroot`, `curl`, `gpg`, `losetup`, `mkfs.ext4`, `mkfs.fat`, `mount`, `qemu-img`, `sgdisk`, `sudo`, `sync`, `systemctl`, `truncate`, `udevadm`, and `umount`.
+The UEFI test auto-detects either of these firmware pairs:
 
-Run `build.py` as your normal user. It calls `sudo` only for operations requiring host root privileges; do not invoke the entire builder with `sudo`.
+```text
+/usr/share/AAVMF/AAVMF_CODE.fd + AAVMF_VARS.fd
+/usr/share/edk2/aarch64/QEMU_EFI.fd + QEMU_VARS.fd
+```
+
+Custom locations can be supplied with `--firmware-code` and
+`--firmware-vars`.
+
+Check the environment without downloading or building anything:
+
+```bash
+./build.py --check
+```
+
+`legacy-build.py` is retained temporarily for comparison. It has the older,
+privileged dependency set and is not the supported public build path.

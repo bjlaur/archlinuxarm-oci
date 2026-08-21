@@ -6,8 +6,7 @@ set -euo pipefail
 
 if command -v pacman >/dev/null 2>&1; then
     packages=(
-        python qemu-img qemu-user-static qemu-user-static-binfmt libarchive
-        gptfdisk dosfstools e2fsprogs curl gnupg util-linux systemd
+        python qemu-img qemu-system-aarch64 edk2-aarch64 libguestfs curl gnupg
     )
     missing=()
     for pkg in "${packages[@]}"; do
@@ -21,15 +20,8 @@ if command -v pacman >/dev/null 2>&1; then
     sudo pacman -S --needed "${missing[@]}"
 
 elif command -v apt-get >/dev/null 2>&1; then
-    # Ubuntu/Debian. qemu-user-static configures the foreign-arch interpreter on
-    # releases where it is a real package; binfmt-support supplies the kernel glue.
-    qemu_binfmt_pkg="qemu-user-static"
-    if ! apt-cache show qemu-user-static 2>/dev/null | grep -q '^Package: qemu-user-static$'; then
-        qemu_binfmt_pkg="qemu-user-binfmt"
-    fi
     packages=(
-        python3 qemu-utils "$qemu_binfmt_pkg" binfmt-support libarchive-tools gdisk
-        dosfstools e2fsprogs curl gnupg util-linux systemd udev
+        python3 qemu-utils qemu-system-arm qemu-efi-aarch64 libguestfs-tools curl gnupg
     )
     missing=()
     for pkg in "${packages[@]}"; do
