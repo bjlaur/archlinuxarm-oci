@@ -6,6 +6,13 @@ partnum="$(lsblk -n -o PARTN "$rootdev")"
 parent="$(lsblk -n -o PKNAME "$rootdev")"
 
 [[ -b "/dev/$parent" && -n "$partnum" ]]
-growpart "/dev/$parent" "$partnum" || true
+if growpart "/dev/$parent" "$partnum"; then
+    :
+else
+    status=$?
+    # growpart returns 1 when the partition already fills the disk and 2 on error.
+    # Only the no-change result is safe to ignore; errors must leave the service retryable.
+    (( status == 1 )) || exit "$status"
+fi
 resize2fs "$rootdev"
 touch /var/lib/oci-root-grown

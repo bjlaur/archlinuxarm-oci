@@ -27,6 +27,8 @@ REQUIRED_COMMANDS = (
 class Builder:
     def __init__(self, args: argparse.Namespace):
         self.args = args
+        self.admin_user = self.resolve_admin_user(args.username)
+        self.hostname = self.validate_hostname(args.hostname)
         self.work = Path(tempfile.mkdtemp(prefix="oci-archarm.", dir="/var/tmp"))
         self.raw = self.work / "archlinuxarm-oci.raw"
         self.rootfs = self.work / "ArchLinuxARM-aarch64-latest.tar.gz"
@@ -35,7 +37,6 @@ class Builder:
         self.loop: str | None = None
         self.mounted: list[Path] = []
         self.output = Path(args.output).resolve()
-        self.admin_user = self.resolve_admin_user(args.username)
         self.mountpoint.mkdir(parents=True)
         atexit.register(self.cleanup)
 
@@ -56,6 +57,22 @@ class Builder:
             if value is not None:
                 raise SystemExit(message)
             print(message)
+
+    @staticmethod
+    def validate_hostname(value: str) -> str:
+        labels = value.split(".")
+        valid_label = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
+        if (
+            not value
+            or len(value) > 253
+            or any(valid_label.fullmatch(label) is None for label in labels)
+        ):
+            raise SystemExit(
+                "Hostname must be 1-253 characters of lowercase letters, digits, hyphens, "
+                "or dots; each label must be 1-63 characters and start and end with a "
+                "letter or digit."
+            )
+        return value
 
     @staticmethod
     def run(argv, *, capture=False, env=None, cwd=None):
@@ -249,7 +266,7 @@ class Builder:
             ADMIN_USER=self.admin_user,
         )
 
-        self.install_text(self.args.hostname + "\n", "/etc/hostname")
+        self.install_text(self.hostname + "\n", "/etc/hostname")
         self.install_text("LANG=en_US.UTF-8\n", "/etc/locale.conf")
 
         self.chroot("/tmp/oci-image-build/finalize.sh")
