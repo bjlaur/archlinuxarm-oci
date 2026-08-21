@@ -12,29 +12,31 @@ Do not silently change these without discussing them with the user:
 
 - Delete `alarm` and all other ordinary UID >=1000 login accounts before first boot.
 - Keep `root`, and prompt interactively for a new root password.
-- Create exactly one normal administrative login: `nullstring`.
-- Prompt interactively for the `nullstring` password.
-- Put `nullstring` in `wheel`; sudo must require a password.
+- Prompt for the administrative username; do not hardcode a personal/default username.
+- Create exactly one normal administrative login using that prompted name.
+- Prompt interactively for that user's password.
+- Put that user in `wheel`; sudo must require a password.
 - SSH password authentication is intentionally **enabled**.
 - SSH public-key authentication is intentionally **disabled**.
 - Root SSH is **disabled** (`PermitRootLogin no`).
-- `AllowUsers nullstring` restricts sshd to that account.
-- System/service accounts are expected to remain; "only root + nullstring" means only interactive human-login accounts.
+- Render `AllowUsers <admin-user>` into sshd configuration so only that prompted account can SSH.
+- System/service accounts are expected to remain; "only root + admin user" means only interactive human-login accounts.
 - nftables is default-deny inbound and initially permits DHCP/ICMP/SSH.
 - SSHGuard is enabled with its nftables backend.
+- `build.py` itself must run as an unprivileged user. Privileged host operations are individually wrapped with `sudo`; do not regress to requiring `sudo ./build.py`.
 
 ## Design principle
 
 Keep `build.py` as orchestration, not as a bag of embedded config strings.
 
-Static guest files belong in `overlay/` at their final filesystem paths. Guest-side command sequences belong in `guest/*.sh`. Only values genuinely unknown until disk creation (currently filesystem UUIDs) belong in `templates/`.
+Static guest files belong in `overlay/` at their final filesystem paths. Guest-side command sequences belong in `guest/*.sh`. Only values genuinely unknown until disk creation (currently filesystem UUIDs and the prompted admin username) belong in `templates/`.
 
 This structure is deliberate because the user wants the build easy to audit and troubleshoot.
 
 ## Build flow
 
-1. Verify host commands and root privileges.
-2. Restart `systemd-binfmt.service`; require `/proc/sys/fs/binfmt_misc/qemu-aarch64`.
+1. Verify host commands, refuse EUID 0, and acquire a sudo timestamp with `sudo -v`.
+2. Restart `systemd-binfmt.service` via an explicit privileged command; require `/proc/sys/fs/binfmt_misc/qemu-aarch64`.
 3. Download the official `ArchLinuxARM-aarch64-latest.tar.gz` plus `.sig`.
 4. Import the published Arch Linux ARM build-system key and verify the tarball signature.
 5. Create a sparse 10G raw GPT disk:
@@ -48,10 +50,10 @@ This structure is deliberate because the user wants the build easy to audit and 
    - full `pacman -Syu`;
    - install guest packages;
    - remove normal login users;
-   - create `nullstring`;
+   - create the prompted administrative user;
    - locale/timezone setup.
-10. Run interactive `passwd root` and `passwd nullstring` from `build.py`.
-11. Verify the only interactive users are exactly `nullstring` and `root`.
+10. Run interactive `passwd root` and `passwd <admin-user>` from `build.py`.
+11. Verify the only interactive users are exactly the prompted admin user and `root`.
 12. Copy `overlay/` into the image.
 13. Render `templates/fstab` and `templates/grub.cfg` with actual UUIDs.
 14. Run `guest/finalize.sh`:
@@ -168,14 +170,14 @@ systemctl status systemd-networkd systemd-resolved nftables sshguard sshd --no-p
 ss -lntup
 nft list ruleset
 sshd -T | grep -E '^(allowusers|passwordauthentication|pubkeyauthentication|permitrootlogin|maxauthtries)'
-getent passwd alarm nullstring root
+getent passwd alarm root <admin-user>
 awk -F: '($3==0 || ($3>=1000 && $3<65534)) && $7 !~ /(nologin|false)$/ {print $1, $3, $7}' /etc/passwd
 ```
 
 Expected SSH-effective policy includes:
 
 ```text
-allowusers nullstring
+allowusers <admin-user>
 passwordauthentication yes
 pubkeyauthentication no
 permitrootlogin no
@@ -201,12 +203,24 @@ OCI VCN security lists / NSGs are a separate outer firewall. When troubleshootin
 
 `requirements.txt` intentionally has no PyPI packages because `build.py` is standard-library-only.
 
+## Host privilege model
+
+The public interface is intentionally:
+
+```bash
+./build.py
+```
+
+Do **not** change it back to `sudo ./build.py`. The builder refuses EUID 0 and calls `sudo -- <command>` only around operations that need host root privileges, including `systemd-binfmt`, `losetup`, `mkfs`, mounts/unmounts, rootfs extraction with ownership preservation, chroot, and writes into the mounted guest filesystem. Downloads, GPG verification, raw-image creation, templating, hashing, and QCOW2 conversion run as the invoking user.
+
+The build starts with `sudo -v` so the host sudo password prompt happens up front and is not easily confused with the later `passwd root` / `passwd <admin-user>` guest prompts. The final QCOW2 should therefore be owned by the invoking user.
+
 ## Useful builder debugging
 
 Run:
 
 ```bash
-sudo ./build.py --keep-work
+./build.py --keep-work
 ```
 
 The builder prints every external command before running it. On failure, preserve the `/var/tmp/oci-archarm.*` directory and report:

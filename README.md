@@ -6,17 +6,17 @@ The project starts from the official Arch Linux ARM generic AArch64 root filesys
 
 ## Security model
 
-The generic Arch Linux ARM rootfs includes the default `alarm` login account. This builder removes every ordinary human UID account before first boot, then creates only `nullstring`.
+The generic Arch Linux ARM rootfs includes the default `alarm` login account. This builder removes every ordinary human UID account before first boot, then prompts for and creates one administrative user.
 
 Resulting interactive access:
 
 | Account | Console | SSH | sudo |
 | --- | --- | --- | --- |
 | `root` | yes | **no** | n/a |
-| `nullstring` | yes | password | yes, password required |
+| prompted admin user | yes | password | yes, password required |
 | `alarm` | **deleted** | no | no |
 
-SSH public-key auth is intentionally disabled. SSH password auth is enabled only for `nullstring`. The image also enables a default-deny nftables firewall and SSHGuard.
+SSH public-key auth is intentionally disabled. SSH password auth is enabled only for the prompted administrative user. The image also enables a default-deny nftables firewall and SSHGuard.
 
 System/service accounts remain in `/etc/passwd` as normal; they are not interactive login users.
 
@@ -24,10 +24,14 @@ System/service accounts remain in `/etc/passwd` as normal; they are not interact
 
 ```bash
 ./install-deps.sh
-sudo ./build.py
+./build.py
 ```
 
-The build stops twice for normal `passwd` prompts: first for `root`, then for `nullstring`. Passwords are never placed on a command line or stored in project files.
+`build.py` must be run as your normal user. It performs downloads, verification, image creation, templating, and QCOW2 conversion unprivileged. When it reaches operations that actually require root (loop devices, mounting, filesystem creation/extraction, chroot, and writes into the mounted guest), it invokes `sudo` for that individual command. The build starts with `sudo -v` so the host sudo prompt is separate from the later guest password prompts.
+
+The builder deliberately refuses `sudo ./build.py`. This keeps the build workspace and final QCOW2 owned by your normal user and makes every privileged command visible in the log.
+
+The build first prompts for the administrative username, then stops for normal `passwd` prompts for `root` and that administrative user. Passwords are never placed on a command line or stored in project files.
 
 Default output:
 
@@ -38,8 +42,10 @@ archlinuxarm-oci.qcow2
 Useful options:
 
 ```bash
-sudo ./build.py --image-size 10G --hostname oracle-arm --output archlinuxarm-oci.qcow2
-sudo ./build.py --keep-work
+./build.py --image-size 10G --hostname oracle-arm --output archlinuxarm-oci.qcow2
+# Optional: skip the username prompt
+./build.py --username myadmin
+./build.py --keep-work
 ```
 
 `--keep-work` leaves the temporary `/var/tmp/oci-archarm.*` directory behind after a failure, which is useful for troubleshooting.
@@ -68,7 +74,7 @@ DEPENDENCIES.md          package/command details
 requirements.txt         documents that Python has no PyPI dependencies
 guest/                   scripts executed inside the AArch64 chroot
 overlay/                 files copied verbatim into the finished image
-templates/               only files that require filesystem UUID substitution
+templates/               files requiring build-time substitution (UUIDs/admin username)
 CODEX_HANDOFF.md          troubleshooting/context handoff for coding agents
 ```
 

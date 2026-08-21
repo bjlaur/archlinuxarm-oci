@@ -31,4 +31,6 @@ If a newer Debian/Ubuntu release exposes `qemu-user-static` only as a virtual pa
 
 ## Commands the builder requires
 
-`blkid`, `bsdtar`, `chroot`, `curl`, `gpg`, `losetup`, `mkfs.ext4`, `mkfs.fat`, `mount`, `qemu-img`, `sgdisk`, `systemctl`, `udevadm`, and `umount`.
+`blkid`, `bsdtar`, `chroot`, `curl`, `gpg`, `losetup`, `mkfs.ext4`, `mkfs.fat`, `mount`, `qemu-img`, `sgdisk`, `sudo`, `systemctl`, `udevadm`, and `umount`.
+
+Run `build.py` as your normal user. It calls `sudo` only for operations requiring host root privileges; do not invoke the entire builder with `sudo`.
