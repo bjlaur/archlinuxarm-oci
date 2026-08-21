@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+rootdev="$(findmnt -n -o SOURCE /)"
+partnum="$(lsblk -n -o PARTN "$rootdev")"
+parent="$(lsblk -n -o PKNAME "$rootdev")"
+
+[[ -b "/dev/$parent" && -n "$partnum" ]]
+growpart "/dev/$parent" "$partnum" || true
+resize2fs "$rootdev"
+touch /var/lib/oci-root-grown

@@ -1,0 +1,11 @@
+[Unit]
+Description=Grow OCI root partition and ext4 filesystem
+After=local-fs.target
+ConditionPathExists=!/var/lib/oci-root-grown
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/oci-grow-root
+
+[Install]
+WantedBy=multi-user.target

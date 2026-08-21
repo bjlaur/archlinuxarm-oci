@@ -1,0 +1,6 @@
+*.qcow2
+*.raw
+*.tar.gz
+*.sig
+__pycache__/
+*.pyc
