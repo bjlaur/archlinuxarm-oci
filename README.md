@@ -11,16 +11,29 @@ rootfs. It is not an official Arch Linux or Arch Linux ARM image.
 
 ## Download and verify
 
-Download the `.qcow2`, matching `.sha256`, and `build-info.json` assets from the
-[latest release](https://github.com/bjlaur/archlinuxarm-oci/releases/latest).
-With the GitHub CLI:
+Open the [latest release](https://github.com/bjlaur/archlinuxarm-oci/releases/latest)
+in your browser and download these three assets:
+
+- the `.qcow2` image;
+- its matching `.qcow2.sha256` checksum file; and
+- `build-info.json`.
+
+In a terminal, change to the directory containing the downloads and verify the
+image:
 
 ```bash
-gh release download --repo bjlaur/archlinuxarm-oci \
-  --pattern '*.qcow2' \
-  --pattern '*.qcow2.sha256' \
-  --pattern 'build-info.json'
 sha256sum -c -- *.qcow2.sha256
+```
+
+You can also verify the image directly against the checksum and filename in
+`build-info.json`:
+
+```bash
+python3 -c '
+import json
+info = json.load(open("build-info.json"))
+print("{}  {}".format(info["image_sha256"], info["image_filename"]))
+' | sha256sum -c -
 ```
 
 `build-info.json` records the project commit, upstream rootfs URL and checksum,
