@@ -10,6 +10,11 @@ on:
         required: false
         type: boolean
         default: false
+      publish_release:
+        description: Publish a GitHub Release after smoke testing (disable for branch validation)
+        required: false
+        type: boolean
+        default: true
       smoke_source_run_id:
         description: Smoke-test the factory image artifact from this prior run ID instead of building
         required: false
@@ -51,11 +56,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           FORCE_REBUILD: ${{ inputs.force_rebuild }}
+          PUBLISH_RELEASE: ${{ inputs.publish_release }}
         shell: bash
         run: |
           set -euo pipefail
-          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch && "$GITHUB_REF" != refs/heads/main ]]; then
-            echo "Manual releases may only be dispatched from main." >&2
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch && "$GITHUB_REF" != refs/heads/main && \
+                "$PUBLISH_RELEASE" == true ]]; then
+            echo "Branch workflow runs must disable release publishing." >&2
             exit 1
           fi
 
@@ -258,6 +265,7 @@ jobs:
 
   publish:
     needs: [decide, build, smoke]
+    if: github.event_name != 'workflow_dispatch' || inputs.publish_release
     runs-on: ubuntu-24.04
     permissions:
       actions: read

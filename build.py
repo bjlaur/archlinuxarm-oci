@@ -47,6 +47,17 @@ ANSI_DIM_CYAN = "\033[2;36m"
 ANSI_GREEN = "\033[32m"
 ANSI_YELLOW = "\033[33m"
 ANSI_RED = "\033[31m"
+GUESTFISH_PROGRESS_EVENT = (
+    'event oci_progress progress "if [ \\"$4\\" -gt 0 ]; then '
+    'p=$((100*$3/$4)); echo \\"     guestfish progress: $p% ($3/$4)\\" >&2; fi"'
+)
+GUESTFISH_PHASES = {
+    "run": "launching the libguestfs appliance",
+    "part-init": "creating the GPT partition table",
+    "mkfs": "formatting a filesystem",
+    "tar-in": "importing an archive into the image",
+    "sync": "flushing filesystem changes",
+}
 
 
 @dataclass(frozen=True)
@@ -83,7 +94,8 @@ def print_detail(message: str) -> None:
     print(colorize(f"  -> {message}", ANSI_DIM_CYAN), flush=True)
 
 
-def run(argv: list[object], *, capture: bool = False, input_text: str | None = None,
+def run(argv: list[object], *, capture: bool = False, stream_stderr: bool = False,
+        input_text: str | None = None,
         env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
     args = [str(item) for item in argv]
     print_command(args)
@@ -94,14 +106,14 @@ def run(argv: list[object], *, capture: bool = False, input_text: str | None = N
             text=True,
             input=input_text,
             stdout=subprocess.PIPE if capture else None,
-            stderr=subprocess.PIPE if capture else None,
+            stderr=None if stream_stderr else subprocess.PIPE if capture else None,
             env=env,
         )
     except subprocess.CalledProcessError as exc:
         if capture:
             if exc.stdout:
                 print(exc.stdout, end="", file=sys.stdout)
-            if exc.stderr:
+            if exc.stderr and not stream_stderr:
                 print(exc.stderr, end="", file=sys.stderr)
         raise
 
@@ -598,9 +610,20 @@ class Builder:
         target = image or self.raw
         assert target is not None
         mode = "--ro" if read_only else "--rw"
-        script = "\n".join(commands) + "\n"
+        instrumented = [GUESTFISH_PROGRESS_EVENT]
+        for guestfish_command in commands:
+            operation = guestfish_command.split(maxsplit=1)[0]
+            if phase := GUESTFISH_PHASES.get(operation):
+                instrumented.append(
+                    f"! echo {shlex.quote('     guestfish phase: ' + phase)} >&2"
+                )
+            instrumented.append(guestfish_command)
+        script = "\n".join(instrumented) + "\n"
         env = os.environ.copy()
         env["LIBGUESTFS_BACKEND"] = "direct"
+        # Guestfish runs event callbacks through $SHELL.  Keep the progress
+        # callback portable even when the invoking user prefers fish or zsh.
+        env["SHELL"] = "/bin/sh"
         if self.work is not None:
             kernel_version = platform.release()
             modules = Path("/lib/modules") / kernel_version
@@ -626,11 +649,12 @@ class Builder:
         ]
         print_detail(f"guestfish: {description}")
         print(colorize("     stdin script:", ANSI_DIM_CYAN))
-        for line in commands:
+        for line in instrumented:
             print(colorize(f"       {line}", ANSI_DIM_CYAN))
         return run(
             arguments,
             capture=capture,
+            stream_stderr=True,
             input_text=script,
             env=env,
         )

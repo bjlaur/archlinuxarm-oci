@@ -91,6 +91,15 @@ class ValidationTests(unittest.TestCase):
             rendered = build.colorize("FAILED", build.ANSI_RED, stream=TerminalBuffer())
         self.assertEqual(rendered, "FAILED")
 
+    def test_streamed_stderr_preserves_stdout_capture_and_failure_checking(self):
+        completed = build.subprocess.CompletedProcess(["tool"], 0, "machine-data", None)
+        with mock.patch.object(build.subprocess, "run", return_value=completed) as invoked:
+            result = build.run(["tool"], capture=True, stream_stderr=True)
+        self.assertEqual(result.stdout, "machine-data")
+        self.assertTrue(invoked.call_args.kwargs["check"])
+        self.assertIs(invoked.call_args.kwargs["stdout"], build.subprocess.PIPE)
+        self.assertIsNone(invoked.call_args.kwargs["stderr"])
+
     def test_guestfish_logs_description_before_running(self):
         with tempfile.TemporaryDirectory() as directory:
             builder = build.Builder(build.parse_args(["--accel", "tcg"]))
@@ -116,9 +125,13 @@ class ValidationTests(unittest.TestCase):
             self.assertEqual(events.mock_calls[1][0], "run")
             self.assertEqual(
                 events.run.call_args.kwargs["input_text"],
-                "run\nmount-ro /dev/sda2 /\ncat /etc/passwd\n",
+                build.GUESTFISH_PROGRESS_EVENT
+                + "\n! echo '     guestfish phase: launching the libguestfs appliance' >&2"
+                + "\nrun\nmount-ro /dev/sda2 /\ncat /etc/passwd\n",
             )
+            self.assertTrue(events.run.call_args.kwargs["stream_stderr"])
             guestfish_env = events.run.call_args.kwargs["env"]
+            self.assertEqual(guestfish_env["SHELL"], "/bin/sh")
             expected_cache = f"{directory}/guestfs-cache/{build.platform.release()}"
             self.assertEqual(guestfish_env["LIBGUESTFS_CACHEDIR"], expected_cache)
             self.assertEqual(guestfish_env["LIBGUESTFS_TMPDIR"], f"{directory}/guestfs-tmp")
@@ -127,8 +140,35 @@ class ValidationTests(unittest.TestCase):
             self.assertEqual(guestfish_env["LIBGUESTFS_BACKEND_SETTINGS"], "force_tcg")
             self.assertEqual(
                 output.getvalue().splitlines(),
-                ["     stdin script:", "       run", "       mount-ro /dev/sda2 /", "       cat /etc/passwd"],
+                [
+                    "     stdin script:",
+                    f"       {build.GUESTFISH_PROGRESS_EVENT}",
+                    "       ! echo '     guestfish phase: launching the libguestfs appliance' >&2",
+                    "       run",
+                    "       mount-ro /dev/sda2 /",
+                    "       cat /etc/passwd",
+                ],
             )
+
+    def test_guestfish_instruments_long_operations_without_changing_their_order(self):
+        builder = build.Builder(build.parse_args([]))
+        builder.raw = Path("image.raw")
+        completed = build.subprocess.CompletedProcess([], 0, "", None)
+        with mock.patch.object(build, "run", return_value=completed) as invoked:
+            builder.guestfish(
+                ["run", "mkfs ext4 /dev/sda", "tar-in payload.tar /", "sync"],
+                description="populating an image",
+                capture=True,
+            )
+        script = invoked.call_args.kwargs["input_text"].splitlines()
+        self.assertEqual(script[0], build.GUESTFISH_PROGRESS_EVENT)
+        for operation in ("run", "mkfs ext4 /dev/sda", "tar-in payload.tar /", "sync"):
+            operation_at = script.index(operation)
+            self.assertIn("guestfish phase:", script[operation_at - 1])
+        self.assertEqual(
+            [line for line in script if not line.startswith("!")][1:],
+            ["run", "mkfs ext4 /dev/sda", "tar-in payload.tar /", "sync"],
+        )
 
     def test_username(self):
         self.assertEqual(build.validate_username("admin_2"), "admin_2")
@@ -650,6 +690,16 @@ class RepositoryTests(unittest.TestCase):
         self.assertLess(
             workflow.index("Smoke-test downloaded QCOW2 artifact"),
             workflow.index("Publish GitHub Release"),
+        )
+
+    def test_release_workflow_supports_non_publishing_branch_validation(self):
+        workflow = self.release_workflow()
+        self.assertIn("publish_release:", workflow)
+        self.assertIn("PUBLISH_RELEASE: ${{ inputs.publish_release }}", workflow)
+        self.assertIn('"$PUBLISH_RELEASE" == true', workflow)
+        self.assertIn(
+            "if: github.event_name != 'workflow_dispatch' || inputs.publish_release",
+            workflow,
         )
 
     def test_ci_libguestfs_setup_only_copies_the_hosted_runner_kernel(self):
