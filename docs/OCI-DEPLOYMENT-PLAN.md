@@ -92,8 +92,9 @@ derive their compartment, and probe availability domains for A1. Resume
 recovers the selected values from deployment state.
 
 When neither bucket option is supplied, use `BUCKET_NAME` as the name of a
-bucket to create. If it is also unset, propose the username-based default and
-require interactive confirmation.
+bucket to use or create. If it is also unset, propose the username-based
+default and require interactive confirmation. Ask separately whether to delete
+that bucket after a successful deployment; the default answer is No.
 
 Only `VM.Standard.A1.Flex` should be accepted initially. Supporting other shapes
 would require defining and testing architecture compatibility rather than
@@ -215,9 +216,8 @@ instance, image, or diagnostic evidence.
 - Treat only an OCI `404 NotAuthorizedOrNotFound` response as proof that an
   object is absent. Authentication, authorization, throttling, and network
   errors must remain errors.
-- Never delete a pre-existing bucket.
-- Delete a run-created bucket only through a separate future opt-in after
-  verifying that it is empty.
+- Delete a bucket only through a separate opt-in after verifying that it is
+  empty.
 - Never terminate an instance or delete a custom image on ordinary failure.
 
 ## Idempotency and recovery

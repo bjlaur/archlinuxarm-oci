@@ -563,20 +563,38 @@ def apply_resume_defaults(args):
             args.bucket = inputs["bucket"]
         elif inputs.get("create_bucket"):
             args.create_bucket = inputs["create_bucket"]
+    if args.cleanup_bucket is None and "cleanup_bucket" in inputs:
+        args.cleanup_bucket = inputs["cleanup_bucket"]
+
+
+def validate_state_file_selection(args):
+    if args.dry_run:
+        return
+    if args.resume:
+        if not args.state_file.exists():
+            raise DeploymentError(f"resume state file does not exist: {args.state_file}")
+    elif args.state_file.exists():
+        raise DeploymentError(
+            f"state file already exists: {args.state_file}; pass --resume to use it"
+        )
 
 
 def resolve_bucket_selection(args, environ=None, input_fn=None):
     if args.bucket or args.create_bucket:
         return
+    args.allow_existing_create_bucket = True
     environ = os.environ if environ is None else environ
     configured = environ.get("BUCKET_NAME", "").strip()
     if configured:
         args.create_bucket = configured
-        print(f"BUCKET  Selected private Standard bucket from BUCKET_NAME: {configured}")
+        print(
+            "BUCKET  Selected private Standard bucket from BUCKET_NAME: "
+            f"{configured}"
+        )
         return
     name = default_bucket_name(environ)
     prompt = (
-        f"Use default private bucket {name!r} and create it during deployment? "
+        f"Use default private bucket {name!r} and create it if needed? "
         "[Y/n] "
     )
     try:
@@ -590,6 +608,25 @@ def resolve_bucket_selection(args, environ=None, input_fn=None):
         raise DeploymentError("bucket creation cancelled")
     args.create_bucket = name
     print(f"BUCKET  Selected private Standard bucket: {name}")
+
+
+def resolve_bucket_cleanup(args, input_fn=None):
+    if args.cleanup_bucket is not None:
+        return
+    args.cleanup_bucket = False
+    if args.bucket or not getattr(args, "allow_existing_create_bucket", False):
+        return
+    name = args.create_bucket
+    prompt = (
+        f"Delete bucket {name!r} after successful deployment if it is empty? "
+        "[N/y] "
+    )
+    try:
+        answer = (input_fn or input)(prompt).strip().lower()
+    except EOFError:
+        return
+    if answer in ("y", "yes"):
+        args.cleanup_bucket = True
 
 
 def find_shape(shapes, name):
@@ -706,6 +743,7 @@ def get_bucket(oci, namespace, name):
 def ensure_bucket(args, oci, state, namespace, tags):
     name = args.bucket or args.create_bucket
     existing = get_bucket(oci, namespace, name)
+    allow_existing = bool(getattr(args, "allow_existing_create_bucket", False))
     if args.bucket:
         if existing is None:
             raise DeploymentError(f"Object Storage bucket does not exist: {name}")
@@ -716,15 +754,27 @@ def ensure_bucket(args, oci, state, namespace, tags):
         created = False
     else:
         if existing is not None:
-            if not args.resume:
+            recorded = state.data.get("resources", {}).get("bucket", {})
+            resumed_preexisting = (
+                args.resume
+                and recorded.get("name") == name
+                and recorded.get("namespace") == namespace
+                and recorded.get("created") is False
+            )
+            resume_without_bucket_record = args.resume and not recorded
+            if allow_existing or resumed_preexisting or resume_without_bucket_record:
+                print(f"UPLOAD  Using existing private Object Storage bucket {name}")
+                created = False
+            elif not args.resume:
                 raise DeploymentError(
                     f"bucket already exists: {name}; use --bucket to select it"
                 )
-            if not tags_match(existing, tags):
+            elif not tags_match(existing, tags):
                 raise DeploymentError(
                     "existing bucket is not tagged as part of this resumed deployment"
                 )
-            created = True
+            else:
+                created = True
         else:
             print(f"UPLOAD  Creating private Object Storage bucket {name}")
             bucket = response_data(
@@ -1332,7 +1382,7 @@ def verify_ssh(args, addresses, state):
 
 
 def cleanup_object(args, oci, state, namespace, bucket, object_name):
-    if not args.cleanup_object:
+    if not (args.cleanup_object or getattr(args, "cleanup_bucket", False)):
         return
     record = state.data.get("resources", {}).get("object", {})
     if record.get("deleted"):
@@ -1365,11 +1415,79 @@ def cleanup_object(args, oci, state, namespace, bucket, object_name):
     state.resource("object", deleted=True)
 
 
+def bucket_object_names(oci, namespace, bucket):
+    response = response_data(
+        oci.run(
+            [
+                "os",
+                "object",
+                "list",
+                "--namespace",
+                namespace,
+                "--bucket-name",
+                bucket,
+                "--all",
+            ]
+        ),
+        dict,
+        "object list response",
+    )
+    objects = response.get("objects", [])
+    if not isinstance(objects, list):
+        raise DeploymentError("object list response has invalid objects")
+    names = []
+    for item in objects:
+        if not isinstance(item, dict) or not isinstance(item.get("name"), str):
+            raise DeploymentError("object list response has an invalid object")
+        names.append(item["name"])
+    return names
+
+
+def cleanup_bucket(args, oci, state, namespace, bucket):
+    if not args.cleanup_bucket:
+        return
+    image = state.data.get("resources", {}).get("image", {})
+    instance = state.data.get("resources", {}).get("instance", {})
+    if (
+        image.get("lifecycle_state") != "AVAILABLE"
+        or instance.get("lifecycle_state") != "RUNNING"
+    ):
+        raise DeploymentError(
+            "refusing bucket cleanup before image and instance are ready"
+        )
+    objects = bucket_object_names(oci, namespace, bucket)
+    if objects:
+        raise DeploymentError(
+            f"refusing to delete non-empty bucket {bucket}: {', '.join(objects)}"
+        )
+    print(f"CLEANUP  Deleting Object Storage bucket {bucket}")
+    oci.run(
+        [
+            "os",
+            "bucket",
+            "delete",
+            "--namespace",
+            namespace,
+            "--name",
+            bucket,
+            "--force",
+            "--opc-client-request-id",
+            client_request_id(state, "delete-bucket"),
+        ]
+    )
+    if get_bucket(oci, namespace, bucket) is not None:
+        raise DeploymentError("bucket still exists after deletion")
+    state.resource("bucket", deleted=True)
+
+
 def print_dry_run(args, image, image_sha256, namespace):
     bucket = args.bucket or args.create_bucket
     operations = []
     if args.create_bucket:
-        operations.append(f"create private Standard bucket {bucket}")
+        if getattr(args, "allow_existing_create_bucket", False):
+            operations.append(f"use or create private Standard bucket {bucket}")
+        else:
+            operations.append(f"create private Standard bucket {bucket}")
     operations.extend(
         [
             f"upload {image.name} ({image_sha256}) to {namespace}/{bucket}",
@@ -1380,8 +1498,10 @@ def print_dry_run(args, image, image_sha256, namespace):
             "assign a public IP" if args.assign_public_ip else "launch without a public IP",
         ]
     )
-    if args.cleanup_object:
+    if args.cleanup_object or args.cleanup_bucket:
         operations.append("delete the uploaded object after successful launch")
+    if args.cleanup_bucket:
+        operations.append("delete the bucket after successful launch if it is empty")
     print("DRY-RUN  Read-only validation passed. Planned mutations:")
     for number, operation in enumerate(operations, 1):
         print(f"  {number}. {operation}")
@@ -1394,7 +1514,7 @@ def parse_args(argv=None):
             "Without placement overrides, the tool discovers accessible subnets, "
             "uses the selected subnet's compartment, and finds an A1 availability "
             "domain. "
-            "Without a bucket option, BUCKET_NAME selects a bucket to create; "
+            "Without a bucket option, BUCKET_NAME selects a bucket to use or create; "
             "if unset, the tool asks before using its default name."
         ),
     )
@@ -1460,6 +1580,20 @@ def parse_args(argv=None):
     parser.add_argument("--reuse-download", action="store_true")
     parser.add_argument("--reuse-object", action="store_true")
     parser.add_argument("--cleanup-object", action="store_true")
+    bucket_cleanup = parser.add_mutually_exclusive_group()
+    bucket_cleanup.add_argument(
+        "--cleanup-bucket",
+        dest="cleanup_bucket",
+        action="store_true",
+        help="delete the selected bucket after a successful deployment if it is empty",
+    )
+    bucket_cleanup.add_argument(
+        "--keep-bucket",
+        dest="cleanup_bucket",
+        action="store_false",
+        help="keep the selected bucket after deployment",
+    )
+    parser.set_defaults(cleanup_bucket=None)
     parser.add_argument("--verify-ssh", action="store_true")
     parser.add_argument("--image-timeout", type=positive_int, default=7200)
     parser.add_argument("--instance-timeout", type=positive_int, default=1800)
@@ -1493,6 +1627,7 @@ def immutable_inputs(args, fingerprint):
         "memory_gbs": args.memory_gbs,
         "boot_volume_gbs": args.boot_volume_gbs,
         "assign_public_ip": args.assign_public_ip,
+        "cleanup_bucket": args.cleanup_bucket,
         "ssh_public_key_fingerprint": fingerprint,
     }
 
@@ -1500,7 +1635,12 @@ def immutable_inputs(args, fingerprint):
 def validate_resume(state, inputs, image_sha256):
     if not state.loaded:
         return
-    if state.data.get("inputs") != inputs:
+    saved_inputs = state.data.get("inputs")
+    if isinstance(saved_inputs, dict):
+        saved_inputs = {**saved_inputs}
+        if "cleanup_bucket" not in saved_inputs:
+            saved_inputs["cleanup_bucket"] = inputs.get("cleanup_bucket", False)
+    if saved_inputs != inputs:
         raise DeploymentError("resume arguments do not match the recorded deployment inputs")
     release = state.data.get("release")
     if not isinstance(release, dict) or release.get("sha256") != image_sha256:
@@ -1518,11 +1658,13 @@ def install_signal_handlers(state):
 
 
 def deploy(args):
+    validate_state_file_selection(args)
     apply_resume_defaults(args)
     validate_local_tools()
     oci = OCIRunner(args.profile, args.config_file, args.region, args.verbose)
     discovered = resolve_deployment_inputs(args, oci)
     resolve_bucket_selection(args)
+    resolve_bucket_cleanup(args)
     print("VALIDATE  Checking local tools, OCI access, network, and A1 shape")
     namespace, subnet, shape, fingerprint = validate_prerequisites(
         args, oci, discovered
@@ -1569,6 +1711,7 @@ def deploy(args):
         state.update(phase="instance-running")
         verify_ssh(args, addresses, state)
         cleanup_object(args, oci, state, namespace, bucket, object_name)
+        cleanup_bucket(args, oci, state, namespace, bucket)
         state.data.pop("failure", None)
         state.update(phase="complete", completed_at=timestamp())
     except BaseException as error:

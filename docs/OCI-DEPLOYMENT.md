@@ -67,8 +67,10 @@ From the repository root, run:
 
 With no bucket option or `BUCKET_NAME` environment variable, the tool proposes
 `archlinuxarm-oci-import-$USER` and asks whether to use it. Accepting selects a
-private Standard-tier bucket that the real deployment will create. Dry-run
-does not create it.
+private Standard-tier bucket that the real deployment will use, creating it
+only if needed. It then asks whether to delete that bucket after successful
+deployment if it is empty; the default answer is No. Dry-run does not create or
+delete any bucket.
 
 The tool also creates the local SSH key pair if necessary, performs read-only
 OCI validation, and downloads the latest release. The downloader verifies that
@@ -114,8 +116,10 @@ key is passed only to the local `ssh` process; it is never uploaded, placed in
 OCI metadata, printed, or written to deployment state.
 
 `--cleanup-object` deletes the temporary QCOW2 object only after the custom
-image is `AVAILABLE` and the instance is `RUNNING`. It does not delete the
-bucket, custom image, instance, or boot volume.
+image is `AVAILABLE` and the instance is `RUNNING`. `--cleanup-bucket` also
+deletes the selected bucket after a successful deployment, but only after the
+temporary object is deleted and the bucket is empty. Neither option deletes the
+custom image, instance, or boot volume.
 
 ## 4. Confirm the result
 
@@ -185,17 +189,19 @@ Do not delete the state file while recovering a partial deployment.
 
 ### Existing buckets and objects
 
-Set `BUCKET_NAME` to choose a different bucket name without a prompt, or pass
-`--create-bucket NAME` explicitly. Both forms tell the tool to create a private
-Standard-tier bucket. Use `--bucket NAME` for a bucket you created separately;
-it must already be private and Standard tier.
+Set `BUCKET_NAME` to choose a different bucket name without a bucket-name
+prompt, or pass `--create-bucket NAME` explicitly. The implicit default and
+`BUCKET_NAME` forms use an existing private Standard-tier bucket when present,
+or create it when missing. Use `--bucket NAME` for a bucket you created
+separately; it must already be private and Standard tier.
 
 The tool refuses to overwrite an object. `--reuse-object` is an explicit
 recovery option and accepts an existing object only when its size and release
 SHA-256 metadata match.
 
 An object reused from outside the deployment is never eligible for automatic
-cleanup. A run-created bucket is also preserved after the object is removed.
+cleanup. Bucket cleanup is opt-in, defaults to No when prompted, and refuses to
+delete a non-empty bucket.
 
 ### Public and private networking
 

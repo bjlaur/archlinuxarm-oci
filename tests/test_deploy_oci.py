@@ -195,6 +195,7 @@ class BucketSelectionTests(unittest.TestCase):
             input_fn=mock.Mock(side_effect=AssertionError("unexpected prompt")),
         )
         self.assertEqual(args.create_bucket, "my-import-bucket")
+        self.assertTrue(args.allow_existing_create_bucket)
 
     def test_default_name_requires_and_accepts_confirmation(self):
         args = no_bucket_args()
@@ -203,6 +204,7 @@ class BucketSelectionTests(unittest.TestCase):
             args, environ={"USER": "test-user"}, input_fn=prompt
         )
         self.assertEqual(args.create_bucket, "archlinuxarm-oci-import-test-user")
+        self.assertTrue(args.allow_existing_create_bucket)
         self.assertIn("[Y/n]", prompt.call_args.args[0])
 
     def test_default_name_rejection_cancels(self):
@@ -218,6 +220,31 @@ class BucketSelectionTests(unittest.TestCase):
                 environ={"USER": "test-user"},
                 input_fn=mock.Mock(side_effect=EOFError),
             )
+
+    def test_default_bucket_cleanup_prompt_defaults_to_keep(self):
+        args = no_bucket_args()
+        deploy.resolve_bucket_selection(
+            args, environ={"USER": "test-user"}, input_fn=lambda _: ""
+        )
+        prompt = mock.Mock(return_value="")
+        deploy.resolve_bucket_cleanup(args, input_fn=prompt)
+        self.assertFalse(args.cleanup_bucket)
+        self.assertIn("[N/y]", prompt.call_args.args[0])
+
+    def test_default_bucket_cleanup_prompt_accepts_yes(self):
+        args = no_bucket_args()
+        deploy.resolve_bucket_selection(
+            args, environ={"USER": "test-user"}, input_fn=lambda _: ""
+        )
+        deploy.resolve_bucket_cleanup(args, input_fn=mock.Mock(return_value="y"))
+        self.assertTrue(args.cleanup_bucket)
+
+    def test_explicit_bucket_cleanup_is_not_prompted(self):
+        args = valid_args()
+        deploy.resolve_bucket_cleanup(
+            args, input_fn=mock.Mock(side_effect=AssertionError("unexpected prompt"))
+        )
+        self.assertFalse(args.cleanup_bucket)
 
 
 class DeploymentInputTests(unittest.TestCase):
@@ -350,6 +377,7 @@ class ResumeDefaultTests(unittest.TestCase):
                             "availability_domain": "test:US-TEST-AD-1",
                             "bucket": None,
                             "create_bucket": "saved-bucket",
+                            "cleanup_bucket": True,
                         }
                     }
                 )
@@ -362,6 +390,7 @@ class ResumeDefaultTests(unittest.TestCase):
         self.assertEqual(args.subnet_id, SUBNET)
         self.assertEqual(args.availability_domain, "test:US-TEST-AD-1")
         self.assertEqual(args.create_bucket, "saved-bucket")
+        self.assertTrue(args.cleanup_bucket)
 
     def test_explicit_resume_value_is_not_replaced(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -413,12 +442,24 @@ class StateTests(unittest.TestCase):
 
     def test_resume_requires_identical_inputs_and_release(self):
         state = mock.Mock(loaded=True)
-        state.data = {"inputs": {"shape": "A1"}, "release": {"sha256": "a" * 64}}
-        deploy.validate_resume(state, {"shape": "A1"}, "a" * 64)
+        state.data = {
+            "inputs": {"shape": "A1"},
+            "release": {"sha256": "a" * 64},
+        }
+        deploy.validate_resume(
+            state, {"shape": "A1", "cleanup_bucket": False}, "a" * 64
+        )
+        deploy.validate_resume(
+            state, {"shape": "A1", "cleanup_bucket": True}, "a" * 64
+        )
         with self.assertRaisesRegex(deploy.DeploymentError, "arguments"):
-            deploy.validate_resume(state, {"shape": "different"}, "a" * 64)
+            deploy.validate_resume(
+                state, {"shape": "different", "cleanup_bucket": False}, "a" * 64
+            )
         with self.assertRaisesRegex(deploy.DeploymentError, "release"):
-            deploy.validate_resume(state, {"shape": "A1"}, "b" * 64)
+            deploy.validate_resume(
+                state, {"shape": "A1", "cleanup_bucket": False}, "b" * 64
+            )
 
 
 class ReleaseTests(unittest.TestCase):
@@ -457,6 +498,59 @@ class ReleaseTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(deploy.DeploymentError, "unsafe"):
                 deploy.parse_release(directory)
+
+
+class BucketMutationTests(unittest.TestCase):
+    def test_auto_selected_existing_bucket_is_reused(self):
+        args = no_bucket_args()
+        args.create_bucket = "test-bucket"
+        args.allow_existing_create_bucket = True
+        args.resume = False
+        state = FakeState(
+            {"deployment_id": str(deploy.uuid.uuid4()), "resources": {}}
+        )
+        oci = SequenceOCI(
+            [
+                {
+                    "data": {
+                        "name": "test-bucket",
+                        "public-access-type": "NoPublicAccess",
+                        "storage-tier": "Standard",
+                        "compartment-id": COMPARTMENT,
+                    }
+                }
+            ]
+        )
+        self.assertEqual(
+            deploy.ensure_bucket(args, oci, state, "namespace", {"tag": "value"}),
+            "test-bucket",
+        )
+        self.assertEqual(state.data["resources"]["bucket"]["created"], False)
+
+    def test_resume_reuses_existing_bucket_without_record(self):
+        args = no_bucket_args()
+        args.create_bucket = "test-bucket"
+        args.resume = True
+        state = FakeState(
+            {"deployment_id": str(deploy.uuid.uuid4()), "resources": {}}
+        )
+        oci = SequenceOCI(
+            [
+                {
+                    "data": {
+                        "name": "test-bucket",
+                        "public-access-type": "NoPublicAccess",
+                        "storage-tier": "Standard",
+                        "compartment-id": COMPARTMENT,
+                    }
+                }
+            ]
+        )
+        self.assertEqual(
+            deploy.ensure_bucket(args, oci, state, "namespace", {"tag": "value"}),
+            "test-bucket",
+        )
+        self.assertEqual(state.data["resources"]["bucket"]["created"], False)
 
 
 class RunnerTests(unittest.TestCase):
@@ -650,6 +744,60 @@ class ObjectSafetyTests(unittest.TestCase):
         self.assertEqual(metadata["archlinuxarm-oci-sha256"], digest)
         self.assertIn("--opc-client-request-id", upload)
 
+    def test_bucket_cleanup_implies_uploaded_object_cleanup(self):
+        args = mock.Mock(cleanup_object=False, cleanup_bucket=True)
+        state = FakeState(
+            {
+                "deployment_id": str(deploy.uuid.uuid4()),
+                "resources": {
+                    "object": {"uploaded": True},
+                    "image": {"lifecycle_state": "AVAILABLE"},
+                    "instance": {"lifecycle_state": "RUNNING"},
+                },
+            }
+        )
+        oci = SequenceOCI([None, None])
+        deploy.cleanup_object(args, oci, state, "ns", "bucket", "image")
+        self.assertEqual(oci.calls[0][0][:3], ["os", "object", "delete"])
+        self.assertTrue(state.data["resources"]["object"]["deleted"])
+
+    def test_bucket_cleanup_deletes_empty_bucket(self):
+        args = mock.Mock(cleanup_bucket=True)
+        state = FakeState(
+            {
+                "deployment_id": str(deploy.uuid.uuid4()),
+                "resources": {
+                    "image": {"lifecycle_state": "AVAILABLE"},
+                    "instance": {"lifecycle_state": "RUNNING"},
+                },
+            }
+        )
+        oci = SequenceOCI(
+            [
+                {"data": {"objects": []}},
+                {},
+                deploy.OCIError([], 1, "ServiceError: 404 NotAuthorizedOrNotFound"),
+            ]
+        )
+        deploy.cleanup_bucket(args, oci, state, "ns", "bucket")
+        self.assertEqual(oci.calls[1][0][:3], ["os", "bucket", "delete"])
+        self.assertTrue(state.data["resources"]["bucket"]["deleted"])
+
+    def test_bucket_cleanup_refuses_non_empty_bucket(self):
+        args = mock.Mock(cleanup_bucket=True)
+        state = FakeState(
+            {
+                "deployment_id": str(deploy.uuid.uuid4()),
+                "resources": {
+                    "image": {"lifecycle_state": "AVAILABLE"},
+                    "instance": {"lifecycle_state": "RUNNING"},
+                },
+            }
+        )
+        oci = SequenceOCI([{"data": {"objects": [{"name": "leftover"}]}}])
+        with self.assertRaisesRegex(deploy.DeploymentError, "non-empty bucket"):
+            deploy.cleanup_bucket(args, oci, state, "ns", "bucket")
+
 
 class MutationCommandTests(unittest.TestCase):
     def state(self):
@@ -718,6 +866,20 @@ class MutationCommandTests(unittest.TestCase):
 
 
 class DryRunTests(unittest.TestCase):
+    def test_existing_state_file_fails_before_discovery_or_prompts(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            state_path = Path(temporary) / "state.json"
+            state_path.write_text("{}")
+            args = valid_args("--state-file", str(state_path))
+            with (
+                mock.patch.object(deploy, "validate_local_tools") as tools,
+                mock.patch.object(deploy, "resolve_deployment_inputs") as discovery,
+                self.assertRaisesRegex(deploy.DeploymentError, "--resume"),
+            ):
+                deploy.deploy(args)
+        tools.assert_not_called()
+        discovery.assert_not_called()
+
     def test_dry_run_stops_before_state_or_mutations(self):
         args = valid_args("--dry-run", "--reuse-download")
         metadata = {"image_filename": "image.qcow2", "image_sha256": "a" * 64}

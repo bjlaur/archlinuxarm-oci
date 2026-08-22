@@ -65,7 +65,8 @@ Run the OCI-read-only check first:
 Dry-run may generate the dedicated local Ed25519 pair at
 `~/.ssh/archlinuxarm-oci`, but it does not create or modify OCI resources. With
 no explicit bucket option, accept or reject the proposed private Standard-tier
-bucket name interactively.
+bucket name interactively. The tool asks separately whether to delete that
+bucket after a successful run; the default answer is No.
 
 After dry-run succeeds:
 
