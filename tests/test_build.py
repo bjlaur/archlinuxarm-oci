@@ -360,11 +360,12 @@ class RepositoryTests(unittest.TestCase):
         self.assertEqual(workflow.count("FORCE_REBUILD: ${{ inputs.force_rebuild }}"), 2)
         self.assertIn("libguestfs-test-tool", workflow)
         self.assertIn("SUPERMIN_KERNEL_VERSION", workflow)
-        self.assertIn("vmlinuz-*-generic", workflow)
+        self.assertIn('sudo install -m 0644 "$runner_kernel" "$kernel"', workflow)
+        self.assertIn('kernel_version="$(uname -r)"', workflow)
 
-    def test_arm_ubuntu_installs_kernel_for_supermin(self):
+    def test_host_dependency_installer_does_not_add_a_second_kernel(self):
         dependencies = (build.PROJECT / "install-deps.sh").read_text()
-        self.assertIn('aarch64|arm64) packages+=(linux-image-generic)', dependencies)
+        self.assertNotIn("linux-image-generic", dependencies)
 
     def test_factory_smoke_waits_for_cloud_init_with_extended_timeout(self):
         with tempfile.TemporaryDirectory() as directory:

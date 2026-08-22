@@ -25,14 +25,11 @@ sudo apt-get update
 sudo apt-get install python3 qemu-utils qemu-system-arm qemu-efi-aarch64 libguestfs-tools curl gnupg
 ```
 
-On native ARM64 Ubuntu hosts, `install-deps.sh` also installs
-`linux-image-generic`. Supermin needs an installed kernel image to construct the
-libguestfs appliance; minimal and hosted ARM environments may not otherwise
-provide one.
-
-The release workflow uses supermin's documented kernel-selection environment
-variables to choose that readable generic kernel instead of the hosted runner's
-newer, unreadable Azure boot kernel.
+Supermin needs read access to a kernel image to construct the libguestfs
+appliance. GitHub's hosted ARM runner restricts its Azure boot kernel, so the
+release workflow uses `sudo` once to make a mode-0644 copy in the ephemeral
+runner temp directory. It then uses supermin's documented kernel-selection
+environment variables and runs libguestfs and the image builder unprivileged.
 
 ## Required commands
 

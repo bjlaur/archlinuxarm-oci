@@ -127,18 +127,19 @@ jobs:
 
       - name: Configure and verify libguestfs appliance
         run: |
-          kernel="$(find /boot -maxdepth 1 -type f -readable -name 'vmlinuz-*-generic' \
-            -printf '%T@ %p\n' | sort -nr | awk 'NR == 1 {print $2}')"
-          if [[ -z "$kernel" ]]; then
-            echo "No readable generic kernel is available for supermin." >&2
+          kernel_version="$(uname -r)"
+          runner_kernel="/boot/vmlinuz-$kernel_version"
+          kernel="$RUNNER_TEMP/libguestfs-vmlinuz-$kernel_version"
+          modules="/lib/modules/$kernel_version"
+          if [[ ! -f "$runner_kernel" ]]; then
+            echo "The running kernel image is missing: $runner_kernel" >&2
             exit 1
           fi
-          kernel_version="${kernel##*/vmlinuz-}"
-          modules="/lib/modules/$kernel_version"
           if [[ ! -d "$modules" ]]; then
             echo "Kernel modules are missing for $kernel_version." >&2
             exit 1
           fi
+          sudo install -m 0644 "$runner_kernel" "$kernel"
           {
             echo "SUPERMIN_KERNEL=$kernel"
             echo "SUPERMIN_KERNEL_VERSION=$kernel_version"
