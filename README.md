@@ -19,11 +19,11 @@ Download and verify the latest image in the current directory:
 curl -fsSLO https://raw.githubusercontent.com/bjlaur/archlinuxarm-oci/main/download-latest.py && python3 download-latest.py
 ```
 
-The downloader requires `curl` and Python 3. Curl provides transfer progress
-and retry handling; Python validates the release metadata and keeps an image
-only after its SHA-256 matches both published checksum sources. The script
-refuses to overwrite existing downloads. Pass a directory as its only argument
-to save the assets somewhere else.
+The downloader requires `curl` and Python 3.8 or newer. Curl provides transfer
+progress and retry handling; Python validates the release metadata and keeps an
+image only after its SHA-256 matches both published checksum sources. The
+script refuses to overwrite existing downloads. Pass a directory as its only
+argument to save the assets somewhere else.
 
 ### Manual download
 
@@ -210,5 +210,18 @@ bash -n ci/*.sh guest/*.sh install-deps.sh
 ./build.py --check
 ```
 
+Downloader-specific tests are intentionally excluded from the default suite.
+Run them explicitly after changing `download-latest.py`:
+
+```bash
+python3 tests/excluded_test_download_latest.py -v
+```
+
 Build progress is colorized on terminals. Redirected output is plain text; set
 `NO_COLOR=1` to disable color explicitly.
+
+## License
+
+The original code and documentation in this repository are available under the
+[MIT License](LICENSE). Software distributed inside the generated image retains
+its respective upstream licenses.

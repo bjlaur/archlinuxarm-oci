@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 """Download and verify the latest published Arch Linux ARM OCI image."""
 
-from __future__ import annotations
-
 import argparse
 import hashlib
 import json
@@ -23,29 +21,35 @@ BUFFER_SIZE = 1024 * 1024
 
 
 def asset_url(asset: str) -> str:
-    base = os.environ.get("ARCHLINUXARM_OCI_RELEASE_BASE", DEFAULT_RELEASE_BASE)
-    return f"{base.rstrip('/')}/{urllib.parse.quote(asset)}"
+    return f"{DEFAULT_RELEASE_BASE}/{urllib.parse.quote(asset)}"
+
+
+def curl_command(asset: str, *options: str) -> list:
+    return [
+        "curl",
+        "--fail",
+        "--location",
+        "--proto",
+        "=https",
+        "--proto-redir",
+        "=https",
+        "--retry",
+        "3",
+        *options,
+        asset_url(asset),
+    ]
 
 
 def fetch(asset: str) -> bytes:
     completed = subprocess.run(
-        [
-            "curl",
-            "--fail",
-            "--silent",
-            "--show-error",
-            "--location",
-            "--retry",
-            "3",
-            asset_url(asset),
-        ],
+        curl_command(asset, "--silent", "--show-error"),
         check=True,
         stdout=subprocess.PIPE,
     )
     return completed.stdout
 
 
-def parse_metadata(contents: bytes) -> tuple[str, str]:
+def parse_metadata(contents: bytes):
     try:
         info = json.loads(contents)
         image = info["image_filename"]
@@ -78,7 +82,7 @@ def parse_checksum(contents: bytes, image: str) -> str:
     return fields[0].lower()
 
 
-def download_image(asset: str, directory: Path) -> tuple[Path, str]:
+def download_image(asset: str, directory: Path):
     descriptor, temporary_name = tempfile.mkstemp(
         prefix=f".{asset}.", suffix=".part", dir=directory
     )
@@ -87,18 +91,13 @@ def download_image(asset: str, directory: Path) -> tuple[Path, str]:
     try:
         os.close(descriptor)
         subprocess.run(
-            [
-                "curl",
-                "--fail",
-                "--location",
+            curl_command(
+                asset,
                 "--show-error",
                 "--progress-bar",
-                "--retry",
-                "3",
                 "--output",
                 temporary,
-                asset_url(asset),
-            ],
+            ),
             check=True,
         )
         digest = hashlib.sha256()
@@ -116,7 +115,7 @@ def write_new(path: Path, contents: bytes) -> None:
         output.write(contents)
 
 
-def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+def parse_args(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "directory",
@@ -127,7 +126,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv=None) -> int:
     args = parse_args(argv)
     destination = Path(args.directory).expanduser().resolve()
     destination.mkdir(parents=True, exist_ok=True)
@@ -155,15 +154,22 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"Downloading {image}", flush=True)
     temporary, actual_checksum = download_image(image, destination)
+    created = []
     try:
         if actual_checksum != expected_checksum:
-            raise ValueError("downloaded image does not match its published SHA-256 checksum")
+            raise ValueError(
+                "downloaded image does not match its published SHA-256 checksum"
+            )
 
         write_new(destination / "build-info.json", metadata_contents)
+        created.append(destination / "build-info.json")
         write_new(destination / checksum_name, checksum_contents)
+        created.append(destination / checksum_name)
         temporary.rename(destination / image)
     except BaseException:
         temporary.unlink(missing_ok=True)
+        for path in created:
+            path.unlink(missing_ok=True)
         raise
 
     print(f"Verified SHA-256: {actual_checksum}")

@@ -49,7 +49,7 @@ jobs:
       rootfs_url: ${{ steps.decision.outputs.rootfs_url }}
       upstream_md5: ${{ steps.decision.outputs.upstream_md5 }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Decide whether an image build is needed
         id: decision
@@ -136,7 +136,7 @@ jobs:
       build_date: ${{ steps.names.outputs.build_date }}
       image_name: ${{ steps.names.outputs.image_name }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Run source checks
         run: |
@@ -232,7 +232,7 @@ jobs:
     needs: [decide, build]
     runs-on: ubuntu-24.04-arm
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install smoke-test dependencies
         run: ./install-deps.sh
@@ -271,7 +271,7 @@ jobs:
       actions: read
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Download tested image artifact
         uses: actions/download-artifact@v4
@@ -361,7 +361,7 @@ jobs:
     if: github.event_name == 'workflow_dispatch' && inputs.smoke_source_run_id != ''
     runs-on: ubuntu-24.04-arm
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install smoke-test dependencies
         run: ./install-deps.sh

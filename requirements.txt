@@ -1,3 +1,4 @@
 # No PyPI dependencies.
-# build.py intentionally uses only the Python standard library.
+# The Python tools use only the standard library; download-latest.py invokes
+# the host curl binary for progress, retries, and HTTPS transfers.
 # Host/system packages are installed by ./install-deps.sh; see DEPENDENCIES.md.
