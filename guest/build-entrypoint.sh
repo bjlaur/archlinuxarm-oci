@@ -3,11 +3,13 @@ set -euo pipefail
 set +x
 export LANG=C.UTF-8 LC_ALL=C.UTF-8
 
-if (( $# != 1 )); then
-    echo "usage: $0 ADMIN_USER" >&2
+if (( $# != 2 )); then
+    echo "usage: $0 BUILD_MODE IMAGE_USER" >&2
     exit 2
 fi
-admin_user="$1"
+build_mode="$1"
+image_user="$2"
+[[ "$build_mode" == development || "$build_mode" == factory ]]
 builder=/usr/local/lib/archlinuxarm-oci-builder
 
 fail() {
@@ -23,23 +25,39 @@ trap fail ERR
 [[ "$(findmnt -n -o SOURCE /)" == /dev/vda2 ]]
 [[ "$(cat /sys/block/vda/serial)" == OCIARCHBUILDER ]]
 
-"$builder/configure.sh" "$admin_user"
+"$builder/configure.sh" "$build_mode" "$image_user"
 
 # Package-owned configuration is deliberately applied only after pacman has
 # installed those packages, avoiding "exists in filesystem" conflicts.
 cp -a "$builder/final-root/." /
 
-echo
-echo "==> SET A NEW ROOT PASSWORD (console only; root SSH is disabled)"
-passwd root
-echo
-echo "==> SET THE SSH/SUDO PASSWORD FOR $admin_user"
-passwd "$admin_user"
+if [[ "$build_mode" == development ]]; then
+    echo
+    echo "==> SET A NEW ROOT PASSWORD (console only; root SSH is disabled)"
+    passwd root
+    echo
+    echo "==> SET THE SSH/SUDO PASSWORD FOR $image_user"
+    passwd "$image_user"
+fi
 
 actual="$($builder/verify-login-users.sh)"
-expected="$(printf '%s\n' root "$admin_user" | sort)"
+expected="$(printf '%s\n' root "$image_user" | sort)"
 [[ "$actual" == "$expected" ]]
-! getent passwd alarm >/dev/null
+if [[ "$build_mode" == development ]]; then
+    ! getent passwd alarm >/dev/null
+else
+    [[ "$image_user" == alarm ]]
+    [[ "$(passwd -S root | awk '{print $2}')" == L ]]
+    [[ "$(passwd -S alarm | awk '{print $2}')" == L ]]
+    [[ "$(id -u alarm)" == 1000 ]]
+    id -nG alarm | tr ' ' '\n' | grep -Fxq wheel
+    [[ "$(getent passwd alarm | cut -d: -f7)" == /bin/bash ]]
+    [[ ! -e /root/.ssh/authorized_keys ]]
+    [[ ! -e /home/alarm/.ssh/authorized_keys ]]
+    visudo -cf /etc/sudoers
+    rm -rf /var/lib/cloud/*
+    rm -f /var/log/cloud-init*.log
+fi
 
 "$builder/finalize.sh"
 

@@ -1,33 +1,58 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if (( $# != 1 )); then
-    echo "usage: $0 ADMIN_USER" >&2
+if (( $# != 2 )); then
+    echo "usage: $0 BUILD_MODE IMAGE_USER" >&2
     exit 2
 fi
-admin_user="$1"
+build_mode="$1"
+image_user="$2"
+[[ "$build_mode" == development || "$build_mode" == factory ]]
 
 pacman-key --init
 pacman-key --populate archlinuxarm
-pacman -Sy --needed --noconfirm \
+packages=(
     grub efibootmgr dosfstools sudo nftables sshguard cloud-guest-utils \
     gptfdisk e2fsprogs openssh vim
+)
+if [[ "$build_mode" == factory ]]; then
+    packages+=(cloud-init)
+fi
+for attempt in 1 2 3; do
+    if pacman -Sy --needed --noconfirm "${packages[@]}"; then
+        break
+    fi
+    if (( attempt == 3 )); then
+        echo "package installation failed after $attempt attempts" >&2
+        exit 1
+    fi
+    echo "package installation attempt $attempt failed; retrying..." >&2
+    sleep $((attempt * 5))
+done
 
 # Arch Linux ARM's generic rootfs ships the human login account `alarm`.
-# Remove every ordinary UID login account before creating the only intended one.
+# Factory images retain it; development images replace all ordinary logins.
 while IFS=: read -r user _ uid _; do
-    if (( uid >= 1000 && uid < 65534 )); then
+    if (( uid >= 1000 && uid < 65534 )) && \
+       [[ "$build_mode" != factory || "$user" != alarm ]]; then
         userdel -r "$user" 2>/dev/null || userdel "$user" || true
     fi
 done < /etc/passwd
 
-if getent passwd "$admin_user" >/dev/null; then
-    echo "requested admin username already belongs to an existing system account: $admin_user" >&2
-    exit 1
+if [[ "$build_mode" == factory ]]; then
+    [[ "$image_user" == alarm ]]
+    getent passwd alarm >/dev/null
+    usermod -s /bin/bash -aG wheel alarm
+    passwd -l root
+    passwd -l alarm
+else
+    if getent passwd "$image_user" >/dev/null; then
+        echo "requested admin username already belongs to an existing system account: $image_user" >&2
+        exit 1
+    fi
+    useradd -m -G wheel -s /bin/bash "$image_user"
 fi
-
-useradd -m -G wheel -s /bin/bash "$admin_user"
-rm -rf /root/.ssh "/home/$admin_user/.ssh"
+rm -rf /root/.ssh "/home/$image_user/.ssh"
 
 ln -sf /usr/share/zoneinfo/UTC /etc/localtime
 sed -i 's/^#\(en_US.UTF-8 UTF-8\)/\1/' /etc/locale.gen

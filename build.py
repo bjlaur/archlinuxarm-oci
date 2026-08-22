@@ -5,11 +5,13 @@ from __future__ import annotations
 
 import argparse
 import atexit
+import base64
 import getpass
 import hashlib
 import json
 import os
 from pathlib import Path
+import platform
 import pty
 import re
 import selectors
@@ -19,9 +21,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
-import termios
 import time
-import tty
 
 
 PROJECT = Path(__file__).resolve().parent
@@ -32,6 +32,12 @@ LINUX_FILESYSTEM_GUID = "0FC63DAF-8483-4772-8E79-3D69D8477DE4"
 BUILD_SUCCESS = b"OCI_IMAGE_BUILD_SUCCESS"
 SMOKE_SUCCESS = b"OCI_IMAGE_UEFI_SMOKE_SUCCESS"
 REQUIRED_COMMANDS = ("curl", "gpg", "guestfish", "qemu-img", "qemu-system-aarch64")
+FACTORY_USER = "alarm"
+BUILD_MODES = ("development", "factory")
+SMOKE_PUBLIC_KEY = (
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEYdU6aY7SBVn3fnVPoknHLghaHffieYYPuJ0a1PUKiT "
+    "archlinuxarm-oci-smoke"
+)
 ANSI_RESET = "\033[0m"
 ANSI_BOLD_BLUE = "\033[1;34m"
 ANSI_DIM_CYAN = "\033[2;36m"
@@ -164,17 +170,6 @@ class ConsoleRunner:
         os.set_blocking(master, False)
         selector = selectors.DefaultSelector()
         selector.register(master, selectors.EVENT_READ, "qemu")
-        stdin_fd: int | None = None
-        saved_tty = None
-        if passwords is None:
-            if not sys.stdin.isatty():
-                process.terminate()
-                raise SystemExit("interactive passwords require a terminal; use --password only for testing")
-            stdin_fd = sys.stdin.fileno()
-            saved_tty = termios.tcgetattr(stdin_fd)
-            tty.setraw(stdin_fd)
-            selector.register(stdin_fd, selectors.EVENT_READ, "stdin")
-
         deadline = time.monotonic() + timeout
         seen_success = False
         seen_fatal: bytes | None = None
@@ -192,11 +187,6 @@ class ConsoleRunner:
                         raise TimeoutError(f"QEMU timed out after {timeout} seconds; serial log: {log}")
 
                     for key, _ in selector.select(timeout=0.25):
-                        if key.data == "stdin":
-                            data = os.read(stdin_fd, 4096)  # type: ignore[arg-type]
-                            if data:
-                                os.write(master, data)
-                            continue
                         try:
                             data = os.read(master, 65536)
                         except BlockingIOError:
@@ -244,8 +234,6 @@ class ConsoleRunner:
                             seen_success = seen_success or success in scan
                         break
         finally:
-            if saved_tty is not None and stdin_fd is not None:
-                termios.tcsetattr(stdin_fd, termios.TCSADRAIN, saved_tty)
             selector.close()
             os.close(master)
             if process.poll() is None:
@@ -276,6 +264,10 @@ class Builder:
         self.output = Path(args.output).resolve()
         self.admin_user: str | None = None
         self.passwords: tuple[str, str] | None = None
+        self.build_mode = "factory" if args.factory_image else "development"
+        self.selected_accel: str | None = None
+        self.build_accel: str | None = None
+        self.smoke_accel: str | None = None
         self.hostname = validate_hostname(args.hostname)
 
     def require_unprivileged(self) -> None:
@@ -283,14 +275,62 @@ class Builder:
             raise SystemExit("refusing to run as root; invoke ./build.py as your normal user")
 
     def check_environment(self, *, required: tuple[str, ...] = REQUIRED_COMMANDS,
-                          require_firmware: bool = True) -> None:
+                          require_firmware: bool = True, require_accel: bool = True) -> None:
         self.require_unprivileged()
         missing = [name for name in required if shutil.which(name) is None]
         if missing:
             raise SystemExit("missing host commands: " + ", ".join(missing) + "\nRun ./install-deps.sh first.")
         if require_firmware:
             self.find_firmware()
+        if require_accel:
+            self.select_acceleration()
         print(colorize("Required rootless build dependencies are available.", ANSI_GREEN))
+
+    @staticmethod
+    def probe_kvm() -> bool:
+        if platform.machine().lower() not in {"aarch64", "arm64"}:
+            return False
+        device = Path("/dev/kvm")
+        if not device.exists() or not os.access(device, os.R_OK | os.W_OK):
+            return False
+        try:
+            result = subprocess.run(
+                [
+                    "qemu-system-aarch64", "-machine", "virt,accel=kvm", "-cpu", "host",
+                    "-nodefaults", "-display", "none", "-S", "-qmp", "stdio",
+                ],
+                check=False,
+                text=True,
+                input='{"execute":"qmp_capabilities"}\n{"execute":"quit"}\n',
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=10,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+        return result.returncode == 0 and '"return"' in result.stdout
+
+    def select_acceleration(self) -> str:
+        if self.selected_accel is not None:
+            return self.selected_accel
+        requested = self.args.accel
+        if requested == "tcg":
+            selected = "tcg"
+        else:
+            usable = self.probe_kvm()
+            if requested == "kvm" and not usable:
+                raise SystemExit(
+                    "KVM requested but /dev/kvm is unavailable, inaccessible, or unusable."
+                )
+            selected = "kvm" if usable else "tcg"
+        self.selected_accel = selected
+        print(f"QEMU acceleration: {selected}")
+        return selected
+
+    def qemu_machine_args(self) -> list[object]:
+        accel = self.select_acceleration()
+        cpu = "host" if accel == "kvm" else "max"
+        return ["-machine", f"virt,accel={accel}", "-cpu", cpu]
 
     def bind_workspace(self, work: Path) -> None:
         self.work = work
@@ -344,22 +384,40 @@ class Builder:
             state = json.loads(self.state_file.read_text())
         except (json.JSONDecodeError, OSError) as exc:
             raise RuntimeError(f"invalid workspace state file: {self.state_file}") from exc
-        if not isinstance(state, dict) or state.get("version") != 1:
+        if not isinstance(state, dict) or state.get("version") != 2:
             raise RuntimeError(f"unsupported workspace state file: {self.state_file}")
+        mode = state.get("build_mode")
+        image_user = state.get("image_user")
+        if mode not in BUILD_MODES or not isinstance(image_user, str):
+            raise RuntimeError(f"invalid workspace state file: {self.state_file}")
         return state
 
     def write_state(self, *, root_uuid: str, smoke_passed: bool) -> None:
         assert self.state_file and self.admin_user
         state = {
-            "version": 1,
-            "admin_user": self.admin_user,
+            "version": 2,
+            "build_mode": self.build_mode,
+            "image_user": self.admin_user,
             "root_uuid": root_uuid,
             "raw": self.raw_identity(),
             "smoke_passed": smoke_passed,
+            "build_accel": self.build_accel,
+            "smoke_accel": self.smoke_accel,
         }
         temporary = self.state_file.with_suffix(".json.tmp")
         temporary.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n")
         os.replace(temporary, self.state_file)
+
+    def adopt_state(self, state: dict[str, object]) -> None:
+        mode = state["build_mode"]
+        image_user = state["image_user"]
+        assert isinstance(mode, str) and isinstance(image_user, str)
+        self.build_mode = mode
+        self.admin_user = image_user
+        build_accel = state.get("build_accel")
+        smoke_accel = state.get("smoke_accel")
+        self.build_accel = build_accel if isinstance(build_accel, str) else None
+        self.smoke_accel = smoke_accel if isinstance(smoke_accel, str) else None
 
     def require_matching_state(self, *, require_smoke: bool) -> dict[str, object]:
         state = self.load_state()
@@ -369,6 +427,7 @@ class Builder:
             )
         if state.get("raw") != self.raw_identity():
             raise RuntimeError("raw disk changed since the workspace state was recorded")
+        self.adopt_state(state)
         if require_smoke and state.get("smoke_passed") is not True:
             raise RuntimeError("workspace has no successful smoke test for the current raw disk")
         return state
@@ -500,19 +559,35 @@ class Builder:
         shutil.copytree(PROJECT / "overlay", final_root, symlinks=True)
         for script in (PROJECT / "guest").glob("*.sh"):
             shutil.copy2(script, builder_dir / script.name)
+        ssh_template = (
+            "sshd-security-factory.conf"
+            if self.build_mode == "factory"
+            else "sshd-security-development.conf"
+        )
         final_generated = {
             "etc/fstab": render_template("fstab", ROOT_UUID=root_uuid, ESP_UUID=esp_uuid),
             "boot/grub/grub.cfg": render_template("grub.cfg", ROOT_UUID=root_uuid),
             "etc/ssh/sshd_config.d/10-oci-security.conf": render_template(
-                "sshd-security.conf", ADMIN_USER=self.admin_user
+                ssh_template, IMAGE_USER=self.admin_user
             ),
             "etc/hostname": self.hostname + "\n",
             "etc/locale.conf": "LANG=en_US.UTF-8\n",
         }
+        if self.build_mode == "factory":
+            final_generated.update({
+                "etc/cloud/cloud.cfg.d/90-oci-alarm.cfg": (
+                    PROJECT / "templates/cloud-init-alarm.cfg"
+                ).read_text(),
+                "etc/sudoers.d/20-alarm-cloud": (
+                    PROJECT / "templates/sudoers-alarm"
+                ).read_text(),
+            })
         for relative, text in final_generated.items():
             path = final_root / relative
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(text)
+            if relative.startswith("etc/sudoers.d/"):
+                path.chmod(0o440)
         resolv = final_root / "etc/resolv.conf"
         if resolv.exists() or resolv.is_symlink():
             resolv.unlink()
@@ -524,7 +599,7 @@ class Builder:
         early_files = {
             "etc/fstab": final_generated["etc/fstab"],
             "etc/systemd/system/oci-image-build.service": render_template(
-                "oci-image-build.service", ADMIN_USER=self.admin_user
+                "oci-image-build.service", BUILD_MODE=self.build_mode, IMAGE_USER=self.admin_user
             ),
         }
         for relative, text in early_files.items():
@@ -557,8 +632,8 @@ class Builder:
     def direct_boot_args(self) -> list[object]:
         assert self.raw and self.kernel and self.initramfs
         return [
-            "qemu-system-aarch64", "-name", "archlinuxarm-oci-build", "-machine", "virt,accel=tcg",
-            "-cpu", "max", "-smp", str(self.args.cpus), "-m", str(self.args.memory),
+            "qemu-system-aarch64", "-name", "archlinuxarm-oci-build", *self.qemu_machine_args(),
+            "-smp", str(self.args.cpus), "-m", str(self.args.memory),
             "-display", "none", "-monitor", "none", "-serial", "stdio", "-no-reboot",
             "-kernel", self.kernel,
             "-initrd", self.initramfs,
@@ -576,6 +651,7 @@ class Builder:
     def run_build_vm(self) -> None:
         assert self.work
         print_stage("Configuring the image inside a disposable AArch64 QEMU VM")
+        self.build_accel = self.select_acceleration()
         try:
             ConsoleRunner.run(
                 self.direct_boot_args(),
@@ -595,6 +671,36 @@ class Builder:
         )
         return result.stdout
 
+    def guest_path_exists(self, path: str) -> bool:
+        result = self.guestfish(
+            ["run", "mount-ro /dev/sda2 /", f"exists {path}"],
+            read_only=True, capture=True,
+        )
+        values = [line.strip() for line in result.stdout.splitlines() if line.strip() in {"true", "false"}]
+        if not values:
+            raise RuntimeError(f"could not inspect guest path: {path}")
+        return values[-1] == "true"
+
+    def guest_glob(self, pattern: str) -> list[str]:
+        result = self.guestfish(
+            ["run", "mount-ro /dev/sda2 /", f"glob echo {pattern}"],
+            read_only=True, capture=True,
+        )
+        return [
+            value for line in result.stdout.splitlines()
+            if (value := line.strip()).startswith("/") and value != pattern
+        ]
+
+    def guest_file_size(self, path: str) -> int:
+        result = self.guestfish(
+            ["run", "mount-ro /dev/sda2 /", f"filesize {guestfish_quote(path)}"],
+            read_only=True, capture=True,
+        )
+        values = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        if not values or not values[-1].isdigit():
+            raise RuntimeError(f"could not inspect guest file size: {path}")
+        return int(values[-1])
+
     def validate_built_image(self, *, require_marker: bool = True) -> None:
         assert self.admin_user
         if require_marker:
@@ -610,20 +716,86 @@ class Builder:
             uid = int(fields[2])
             if (uid == 0 or 1000 <= uid < 65534) and not re.search(r"(?:nologin|false)$", fields[6]):
                 interactive.append(fields[0])
-        if sorted(interactive) != sorted(["root", self.admin_user]) or re.search(r"^alarm:", passwd, re.MULTILINE):
+        if sorted(interactive) != sorted(["root", self.admin_user]):
             raise RuntimeError(f"unexpected interactive users in completed image: {interactive}")
         ssh = self.read_guest_file("/etc/ssh/sshd_config.d/10-oci-security.conf")
-        required = (
-            f"AllowUsers {self.admin_user}", "PasswordAuthentication yes", "PubkeyAuthentication no",
-            "KbdInteractiveAuthentication no", "PermitRootLogin no",
-        )
+        if self.build_mode == "factory":
+            if self.admin_user != FACTORY_USER or re.search(r"^arch:", passwd, re.MULTILINE):
+                raise RuntimeError("factory image must preserve alarm and must not contain an arch account")
+            required = (
+                "AllowUsers alarm", "PasswordAuthentication no", "PubkeyAuthentication yes",
+                "KbdInteractiveAuthentication no", "PermitRootLogin no", "PermitEmptyPasswords no",
+            )
+        else:
+            if re.search(r"^alarm:", passwd, re.MULTILINE):
+                raise RuntimeError("development image still contains the upstream alarm account")
+            required = (
+                f"AllowUsers {self.admin_user}", "PasswordAuthentication yes", "PubkeyAuthentication no",
+                "KbdInteractiveAuthentication no", "PermitRootLogin no", "PermitEmptyPasswords no",
+            )
         for line in required:
             if line not in ssh:
                 raise RuntimeError(f"completed image is missing SSH policy: {line}")
+        if self.build_mode == "factory":
+            shadow = self.read_guest_file("/etc/shadow")
+            hashes = {
+                fields[0]: fields[1]
+                for line in shadow.splitlines()
+                if len(fields := line.split(":")) >= 2 and fields[0] in {"root", FACTORY_USER}
+            }
+            if set(hashes) != {"root", FACTORY_USER} or any(
+                not value.startswith(("!", "*")) for value in hashes.values()
+            ):
+                raise RuntimeError("factory root and alarm passwords must be locked")
+            cloud_cfg = self.read_guest_file("/etc/cloud/cloud.cfg.d/90-oci-alarm.cfg")
+            if "name: alarm" not in cloud_cfg or "lock_passwd: true" not in cloud_cfg:
+                raise RuntimeError("factory image is missing the alarm cloud-init override")
+            sudoers = self.read_guest_file("/etc/sudoers.d/20-alarm-cloud")
+            if "alarm ALL=(ALL:ALL) NOPASSWD: ALL" not in sudoers:
+                raise RuntimeError("factory image is missing passwordless alarm sudo")
+            required_paths = (
+                "/usr/bin/cloud-init",
+                "/usr/lib/systemd/system-generators/cloud-init-generator",
+                "/usr/lib/systemd/system/cloud-init.target",
+                "/usr/lib/systemd/system/cloud-init-local.service",
+                "/usr/lib/systemd/system/cloud-init-main.service",
+                "/usr/lib/systemd/system/cloud-final.service",
+            )
+            for path in required_paths:
+                if not self.guest_path_exists(path):
+                    raise RuntimeError(f"factory image is missing cloud-init component: {path}")
+            forbidden_paths = (
+                "/root/.ssh/authorized_keys", "/root/.ssh/authorized_keys2",
+                "/home/alarm/.ssh/authorized_keys", "/home/alarm/.ssh/authorized_keys2",
+                "/var/lib/systemd/random-seed", "/var/lib/cloud/instance",
+            )
+            for path in forbidden_paths:
+                if self.guest_path_exists(path):
+                    raise RuntimeError(f"factory image contains forbidden first-boot state: {path}")
+            if self.guest_file_size("/etc/machine-id") != 0:
+                raise RuntimeError("factory machine-id is not empty")
+            if self.guest_glob("/etc/ssh/ssh_host_*") or self.guest_glob("/var/lib/cloud/instances/*"):
+                raise RuntimeError("factory image contains generated SSH or cloud-init state")
 
     def remove_build_marker(self) -> None:
         self.guestfish([
             "run", "mount /dev/sda2 /", "rm-f /var/lib/archlinuxarm-oci/build-success", "sync", "umount-all"
+        ])
+
+    def sanitize_factory_image(self) -> None:
+        """Remove identity and first-boot state after systemd can no longer recreate it."""
+        self.guestfish([
+            "run",
+            "mount /dev/sda2 /",
+            "truncate-size /etc/machine-id 0",
+            "rm-f /var/lib/systemd/random-seed",
+            "glob rm-f /etc/ssh/ssh_host_*",
+            "rm-rf /root/.ssh",
+            f"rm-rf /home/{FACTORY_USER}/.ssh",
+            "rm-rf /var/lib/cloud",
+            "mkdir-p /var/lib/cloud",
+            "sync",
+            "umount-all",
         ])
 
     def root_uuid(self) -> str:
@@ -664,9 +836,22 @@ class Builder:
         script_dir = staging / "usr/local/lib/archlinuxarm-oci-smoke"
         script_dir.mkdir(parents=True)
         shutil.copy2(PROJECT / "guest/uefi-smoke-test.sh", script_dir / "uefi-smoke-test.sh")
+        factory = self.build_mode == "factory"
+        smoke_key_b64 = base64.b64encode(SMOKE_PUBLIC_KEY.encode()).decode() if factory else "-"
         generated = {
             "etc/systemd/system/oci-image-smoke.service": render_template(
-                "oci-image-smoke.service", ADMIN_USER=self.admin_user
+                "oci-image-smoke.service",
+                BUILD_MODE=self.build_mode,
+                IMAGE_USER=self.admin_user,
+                SMOKE_KEY_B64=smoke_key_b64,
+                AFTER_UNITS=(
+                    "dbus.service cloud-final.service cloud-init-main.service" if factory else ""
+                ),
+                REQUIRES_UNITS=(
+                    "Requires=dbus.service cloud-init-main.service cloud-final.service"
+                    if factory else ""
+                ),
+                TIMEOUT_SECONDS="600" if factory else "300",
             ),
             "boot/grub/grub.cfg": render_template("grub-smoke.cfg", ROOT_UUID=root_uuid),
         }
@@ -682,6 +867,44 @@ class Builder:
             "sync", "umount-all",
         ], image=overlay, image_format="qcow2")
 
+    def create_nocloud_seed(self) -> Path:
+        assert self.work
+        seed_dir = self.work / "nocloud-seed"
+        if seed_dir.is_symlink():
+            raise RuntimeError(f"refusing symlinked NoCloud seed directory: {seed_dir}")
+        if seed_dir.exists():
+            shutil.rmtree(seed_dir)
+        seed_dir.mkdir()
+        (seed_dir / "meta-data").write_text(
+            "instance-id: archlinuxarm-oci-smoke\nlocal-hostname: oci-factory-smoke\n"
+        )
+        (seed_dir / "user-data").write_text(
+            "#cloud-config\n"
+            "users:\n"
+            "  - default\n"
+            "ssh_authorized_keys:\n"
+            f"  - {SMOKE_PUBLIC_KEY}\n"
+            "write_files:\n"
+            "  - path: /var/lib/archlinuxarm-oci/cloud-init-smoke\n"
+            "    permissions: '0600'\n"
+            "    content: cloud-init NoCloud smoke completed\n"
+        )
+        seed_tar = self.work / "nocloud-seed.tar"
+        if seed_tar.exists():
+            seed_tar.unlink()
+        with tarfile.open(seed_tar, "w") as archive:
+            for child in sorted(seed_dir.iterdir()):
+                archive.add(child, arcname=child.name)
+        seed = self.work / "nocloud-seed.raw"
+        if seed.exists():
+            seed.unlink()
+        run(["qemu-img", "create", "-f", "raw", seed, "4M"])
+        self.guestfish([
+            "run", "modprobe vfat", "mkfs vfat /dev/sda label:CIDATA", "mount /dev/sda /",
+            f"tar-in {guestfish_quote(seed_tar)} /", "sync", "umount-all",
+        ], image=seed, image_format="raw")
+        return seed
+
     def run_uefi_smoke_test(self, root_uuid: str) -> None:
         assert self.work and self.raw
         print_stage("Boot-testing the completed image through AArch64 UEFI")
@@ -696,20 +919,28 @@ class Builder:
                 disposable.unlink()
         run(["qemu-img", "create", "-f", "qcow2", "-F", "raw", "-b", self.raw, overlay])
         self.install_smoke_payload(overlay, root_uuid)
+        seed = self.create_nocloud_seed() if self.build_mode == "factory" else None
         code, variables = self.find_firmware()
         vars_copy = self.work / "AAVMF_VARS.fd"
         shutil.copyfile(variables, vars_copy)
         args: list[object] = [
-            "qemu-system-aarch64", "-name", "archlinuxarm-oci-uefi-smoke", "-machine", "virt,accel=tcg",
-            "-cpu", "max", "-smp", "2", "-m", "2048", "-display", "none", "-monitor", "none",
+            "qemu-system-aarch64", "-name", "archlinuxarm-oci-uefi-smoke", *self.qemu_machine_args(),
+            "-smp", "2", "-m", "2048", "-display", "none", "-monitor", "none",
             "-serial", "stdio", "-no-reboot",
             "-drive", f"if=pflash,format=raw,unit=0,readonly=on,file={code}",
             "-drive", f"if=pflash,format=raw,unit=1,file={vars_copy}",
             "-drive", f"file={overlay},format=qcow2,if=none,id=rootdisk,cache=writeback",
             "-device", "virtio-blk-pci,drive=rootdisk",
+            "-netdev", "user,id=net0", "-device", "virtio-net-pci,netdev=net0",
             "-object", "rng-random,filename=/dev/urandom,id=rng0", "-device", "virtio-rng-pci,rng=rng0",
             "-rtc", "base=utc",
         ]
+        if seed is not None:
+            args.extend([
+                "-drive", f"file={seed},format=raw,if=none,id=cidata,readonly=on",
+                "-device", "virtio-blk-pci,drive=cidata",
+            ])
+        self.smoke_accel = self.select_acceleration()
         ConsoleRunner.run(
             args, log=self.work / "uefi-smoke-serial.log", success=SMOKE_SUCCESS,
             timeout=self.args.smoke_timeout,
@@ -757,25 +988,6 @@ class Builder:
         admin_password = prompt_password(self.admin_user)
         self.passwords = (root_password, admin_password)
 
-    def select_resume_admin(self, state: dict[str, object] | None) -> None:
-        stored = state.get("admin_user") if state else None
-        if stored is not None and not isinstance(stored, str):
-            raise RuntimeError("workspace state contains an invalid admin username")
-        if self.args.username is not None:
-            try:
-                selected = validate_username(self.args.username)
-            except ValueError as exc:
-                raise SystemExit(str(exc)) from exc
-            if stored is not None and selected != stored:
-                raise RuntimeError(
-                    f"--username {selected!r} does not match workspace admin {stored!r}"
-                )
-            self.admin_user = selected
-        elif isinstance(stored, str):
-            self.admin_user = stored
-        else:
-            self.admin_user = prompt_username(None)
-
     def run_build_stage(self) -> tuple[str, str]:
         self.download_and_verify()
         self.extract_verified_kernel()
@@ -783,6 +995,8 @@ class Builder:
         payload = self.create_build_payload(root_uuid, esp_uuid)
         self.install_build_payload(payload)
         self.run_build_vm()
+        if self.build_mode == "factory":
+            self.sanitize_factory_image()
         self.validate_built_image()
         self.remove_build_marker()
         self.write_state(root_uuid=root_uuid, smoke_passed=False)
@@ -802,12 +1016,9 @@ class Builder:
             assert self.raw
             if not self.raw.is_file():
                 raise RuntimeError(f"workspace raw disk is missing: {self.raw}")
-            state = self.load_state()
-            if state is not None and state.get("raw") != self.raw_identity():
-                raise RuntimeError("raw disk changed since the workspace state was recorded")
-            self.select_resume_admin(state)
+            state = self.require_matching_state(require_smoke=False)
             root_uuid = self.root_uuid()
-            if state is not None and state.get("root_uuid") != root_uuid:
+            if state.get("root_uuid") != root_uuid:
                 raise RuntimeError("root filesystem UUID does not match workspace state")
             self.validate_built_image(require_marker=False)
             self.run_uefi_smoke_test(root_uuid)
@@ -817,7 +1028,7 @@ class Builder:
             return
 
         if self.args.convert_only:
-            self.check_environment(required=("qemu-img",), require_firmware=False)
+            self.check_environment(required=("qemu-img",), require_firmware=False, require_accel=False)
             if self.args.password is not None or self.args.username is not None:
                 raise SystemExit("--username and --password are not used with --convert-only")
             self.start_workspace(resume=True)
@@ -832,8 +1043,11 @@ class Builder:
         self.check_environment()
         if not self.args.build_only:
             self.confirm_output()
-        self.admin_user = prompt_username(self.args.username)
-        self.collect_passwords()
+        if self.build_mode == "factory":
+            self.admin_user = FACTORY_USER
+        else:
+            self.admin_user = prompt_username(self.args.username)
+            self.collect_passwords()
         self.start_workspace()
         root_uuid, _ = self.run_build_stage()
         if self.args.build_only:
@@ -845,15 +1059,18 @@ class Builder:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--image-size", default="10G", help="virtual source disk size (default: 10G)")
+    parser.add_argument("--image-size", default="4G", help="virtual source disk size (default: 4G)")
     parser.add_argument("--hostname", default="oracle-arm", help="guest hostname")
     parser.add_argument("--username", help="admin username (prompted when omitted)")
     parser.add_argument("--password", help="UNSAFE TEST-ONLY password for both interactive accounts")
+    parser.add_argument("--factory-image", action="store_true", help="build a credential-free cloud-init factory image")
     parser.add_argument("--output", default="archlinuxarm-oci.qcow2", help="output QCOW2 path")
     parser.add_argument("--rootfs-url", default=DEFAULT_ROOTFS_URL, help="official ALARM rootfs URL")
     parser.add_argument("--keyserver", default="hkps://keyserver.ubuntu.com", help="OpenPGP keyserver")
     parser.add_argument("--memory", type=int, default=4096, help="build VM RAM in MiB (default: 4096)")
     parser.add_argument("--cpus", type=int, default=4, help="build VM vCPU count (default: 4)")
+    parser.add_argument("--accel", choices=("auto", "kvm", "tcg"), default="auto",
+                        help="QEMU acceleration (default: auto)")
     parser.add_argument("--build-timeout", type=int, default=10800, help="build VM timeout in seconds")
     parser.add_argument("--smoke-timeout", type=int, default=600, help="UEFI smoke-test timeout in seconds")
     parser.add_argument("--firmware-code", help="AArch64 UEFI CODE firmware path")
@@ -866,7 +1083,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     stages.add_argument("--build-only", action="store_true", help="build and validate the raw disk, then stop")
     stages.add_argument("--smoke-test-only", action="store_true", help="UEFI smoke-test an existing workspace")
     stages.add_argument("--convert-only", action="store_true", help="convert a smoke-tested workspace raw disk to QCOW2")
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.factory_image and (args.username is not None or args.password is not None):
+        parser.error("--factory-image cannot be combined with --username or --password")
+    if (args.smoke_test_only or args.convert_only) and args.factory_image:
+        parser.error("stage-only modes infer the build mode from --work-dir state; omit --factory-image")
+    if (args.smoke_test_only or args.convert_only) and (
+        args.username is not None or args.password is not None
+    ):
+        parser.error("--username and --password are only valid when running the build stage")
+    return args
 
 
 def main() -> int:

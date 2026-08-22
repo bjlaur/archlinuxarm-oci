@@ -6,7 +6,7 @@ RequiresMountsFor=/boot/efi
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/lib/archlinuxarm-oci-builder/build-entrypoint.sh {{ADMIN_USER}}
+ExecStart=/usr/local/lib/archlinuxarm-oci-builder/build-entrypoint.sh {{BUILD_MODE}} {{IMAGE_USER}}
 StandardInput=tty-force
 StandardOutput=tty
 StandardError=tty
@@ -14,4 +14,3 @@ TTYPath=/dev/ttyAMA0
 TTYReset=yes
 TTYVHangup=yes
 TimeoutStartSec=infinity
-

@@ -1,0 +1,239 @@
+name: Build and publish factory image
+
+on:
+  schedule:
+    - cron: "17 7 * * *"
+  workflow_dispatch:
+    inputs:
+      force_rebuild:
+        description: Build even when this commit and upstream rootfs were already released
+        required: false
+        type: boolean
+        default: false
+  push:
+    branches: [main]
+    paths:
+      - build.py
+      - guest/**
+      - overlay/**
+      - templates/**
+      - tests/**
+      - install-deps.sh
+      - requirements.txt
+      - DEPENDENCIES.md
+      - .github/workflows/release.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: archlinuxarm-oci-release
+  cancel-in-progress: false
+
+jobs:
+  decide:
+    runs-on: ubuntu-24.04
+    outputs:
+      should_build: ${{ steps.decision.outputs.should_build }}
+      reason: ${{ steps.decision.outputs.reason }}
+      rootfs_url: ${{ steps.decision.outputs.rootfs_url }}
+      upstream_md5: ${{ steps.decision.outputs.upstream_md5 }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Decide whether an image build is needed
+        id: decision
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FORCE_REBUILD: ${{ inputs.force_rebuild }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch && "$GITHUB_REF" != refs/heads/main ]]; then
+            echo "Manual releases may only be dispatched from main." >&2
+            exit 1
+          fi
+
+          rootfs_url="$(python3 -c 'import build; print(build.DEFAULT_ROOTFS_URL)')"
+          checksum="$(curl -fsSL --retry 3 "${rootfs_url}.md5" | awk 'NR == 1 {print tolower($1)}')"
+          if [[ ! "$checksum" =~ ^[0-9a-f]{32}$ ]]; then
+            echo "Invalid upstream MD5 response for ${rootfs_url}.md5" >&2
+            exit 1
+          fi
+
+          latest_sha=""
+          latest_md5=""
+          latest_tag="$(gh release view --json tagName --jq .tagName 2>/dev/null || true)"
+          if [[ -n "$latest_tag" ]]; then
+            mkdir -p "$RUNNER_TEMP/latest-release"
+            if gh release download "$latest_tag" --pattern build-info.json \
+                 --dir "$RUNNER_TEMP/latest-release" >/dev/null 2>&1; then
+              parsed="$(python3 - "$RUNNER_TEMP/latest-release/build-info.json" <<'PY' || true
+          import json
+          import re
+          import sys
+
+          try:
+              data = json.load(open(sys.argv[1], encoding="utf-8"))
+              sha = data["git_sha"]
+              md5 = data["upstream_md5"].lower()
+              if not re.fullmatch(r"[0-9a-f]{40}", sha):
+                  raise ValueError("invalid git SHA")
+              if not re.fullmatch(r"[0-9a-f]{32}", md5):
+                  raise ValueError("invalid MD5")
+              print(sha, md5)
+          except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+              pass
+          PY
+              )"
+              if [[ -n "$parsed" ]]; then
+                read -r latest_sha latest_md5 <<<"$parsed"
+              fi
+            fi
+          fi
+
+          should_build=false
+          reason=already-released
+          if [[ "$FORCE_REBUILD" == true ]]; then
+            should_build=true
+            reason=manual-force
+          elif [[ -z "$latest_sha" || -z "$latest_md5" ]]; then
+            should_build=true
+            reason=no-valid-previous-release
+          elif [[ "$GITHUB_EVENT_NAME" == schedule && "$checksum" != "$latest_md5" ]]; then
+            should_build=true
+            reason=upstream-rootfs-changed
+          elif [[ "$GITHUB_EVENT_NAME" != schedule && \
+                  ("$GITHUB_SHA" != "$latest_sha" || "$checksum" != "$latest_md5") ]]; then
+            should_build=true
+            reason=project-or-upstream-changed
+          fi
+
+          echo "should_build=$should_build" >> "$GITHUB_OUTPUT"
+          echo "reason=$reason" >> "$GITHUB_OUTPUT"
+          echo "rootfs_url=$rootfs_url" >> "$GITHUB_OUTPUT"
+          echo "upstream_md5=$checksum" >> "$GITHUB_OUTPUT"
+          echo "Decision: should_build=$should_build reason=$reason"
+
+  build:
+    needs: decide
+    if: needs.decide.outputs.should_build == 'true'
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: ./install-deps.sh
+
+      - name: Run source and environment checks
+        run: |
+          python3 -m unittest discover -s tests -v
+          python3 -m py_compile build.py
+          bash -n guest/*.sh install-deps.sh
+          ./build.py --check
+
+      - name: Prepare release names
+        id: names
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPSTREAM_MD5: ${{ needs.decide.outputs.upstream_md5 }}
+          FORCE_REBUILD: ${{ inputs.force_rebuild }}
+        run: |
+          set -euo pipefail
+          build_date="$(date -u +%Y.%m.%d)"
+          short_sha="${GITHUB_SHA:0:7}"
+          md5_prefix="${UPSTREAM_MD5:0:8}"
+          tag="${build_date}-${short_sha}-${md5_prefix}"
+          if [[ "$FORCE_REBUILD" == true ]] && gh release view "$tag" >/dev/null 2>&1; then
+            tag="${tag}-run${GITHUB_RUN_ID}"
+          fi
+          release_dir="$RUNNER_TEMP/release"
+          image="$release_dir/archlinuxarm-oci-aarch64-${tag}.qcow2"
+          mkdir -p "$release_dir"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "build_date=$build_date" >> "$GITHUB_OUTPUT"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+
+      - name: Build and fully test factory image
+        run: |
+          ./build.py \
+            --factory-image \
+            --work-dir "$RUNNER_TEMP/archlinuxarm-oci-work" \
+            --rootfs-url "${{ needs.decide.outputs.rootfs_url }}" \
+            --output "${{ steps.names.outputs.image }}"
+
+      - name: Generate checksums and build metadata
+        env:
+          IMAGE: ${{ steps.names.outputs.image }}
+          BUILD_DATE: ${{ steps.names.outputs.build_date }}
+          UPSTREAM_ROOTFS_URL: ${{ needs.decide.outputs.rootfs_url }}
+          UPSTREAM_MD5: ${{ needs.decide.outputs.upstream_md5 }}
+        run: |
+          set -euo pipefail
+          image_name="$(basename "$IMAGE")"
+          (cd "$(dirname "$IMAGE")" && sha256sum "$image_name" > "$image_name.sha256")
+          image_sha256="$(awk '{print $1}' "$IMAGE.sha256")"
+          export IMAGE_NAME="$image_name" IMAGE_SHA256="$image_sha256"
+          python3 - "$RUNNER_TEMP/archlinuxarm-oci-work/build-state.json" \
+            "$(dirname "$IMAGE")/build-info.json" <<'PY'
+          import json
+          import os
+          import sys
+          from datetime import datetime, timezone
+          import build
+
+          state = json.load(open(sys.argv[1], encoding="utf-8"))
+          info = {
+              "schema_version": 1,
+              "build_date_utc": datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+              "git_sha": os.environ["GITHUB_SHA"],
+              "git_short_sha": os.environ["GITHUB_SHA"][:7],
+              "build_mode": "factory",
+              "factory_user": "alarm",
+              "upstream_rootfs_url": os.environ["UPSTREAM_ROOTFS_URL"],
+              "upstream_md5": os.environ["UPSTREAM_MD5"],
+              "rootfs_signing_fingerprint": build.ROOTFS_SIGNING_FINGERPRINT,
+              "image_filename": os.environ["IMAGE_NAME"],
+              "image_sha256": os.environ["IMAGE_SHA256"],
+              "build_accel": state.get("build_accel"),
+              "smoke_accel": state.get("smoke_accel"),
+          }
+          with open(sys.argv[2], "w", encoding="utf-8") as output:
+              json.dump(info, output, indent=2, sort_keys=True)
+              output.write("\n")
+          PY
+          cat > "$(dirname "$IMAGE")/release-notes.md" <<EOF
+          Community-built Arch Linux ARM OCI factory image.
+
+          - Project commit: \`${GITHUB_SHA}\`
+          - Upstream rootfs MD5: \`${UPSTREAM_MD5}\`
+          - Factory login: \`alarm\` with the SSH key supplied at OCI launch
+
+          The upstream rootfs was authenticated with its detached OpenPGP signature; MD5 is used only for change detection.
+          EOF
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          IMAGE: ${{ steps.names.outputs.image }}
+          TAG: ${{ steps.names.outputs.tag }}
+        run: |
+          release_dir="$(dirname "$IMAGE")"
+          gh release create "$TAG" \
+            "$IMAGE" \
+            "$IMAGE.sha256" \
+            "$release_dir/build-info.json" \
+            --title "Arch Linux ARM OCI Image — ${{ steps.names.outputs.build_date }}" \
+            --notes-file "$release_dir/release-notes.md"
+
+      - name: Upload failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: factory-build-diagnostics-${{ github.run_id }}
+          if-no-files-found: ignore
+          retention-days: 7
+          path: |
+            ${{ runner.temp }}/archlinuxarm-oci-work/build-serial.log
+            ${{ runner.temp }}/archlinuxarm-oci-work/uefi-smoke-serial.log
+            ${{ runner.temp }}/archlinuxarm-oci-work/build-state.json

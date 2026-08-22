@@ -1,12 +1,12 @@
 [Unit]
 Description=Non-destructive UEFI boot smoke test
-After=local-fs.target
+After=local-fs.target {{AFTER_UNITS}}
+{{REQUIRES_UNITS}}
 RequiresMountsFor=/boot/efi
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/lib/archlinuxarm-oci-smoke/uefi-smoke-test.sh {{ADMIN_USER}}
+ExecStart=/usr/local/lib/archlinuxarm-oci-smoke/uefi-smoke-test.sh {{BUILD_MODE}} {{IMAGE_USER}} {{SMOKE_KEY_B64}}
 StandardOutput=journal+console
 StandardError=journal+console
-TimeoutStartSec=300
-
+TimeoutStartSec={{TIMEOUT_SECONDS}}
