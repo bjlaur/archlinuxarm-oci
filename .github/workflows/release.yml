@@ -183,11 +183,17 @@ jobs:
           echo "build_date=$build_date" >> "$GITHUB_OUTPUT"
           echo "image=$image" >> "$GITHUB_OUTPUT"
 
+      - name: Report workspace storage
+        run: |
+          findmnt -T /tmp
+          findmnt -T "$RUNNER_TEMP"
+          df -hT /tmp "$RUNNER_TEMP"
+
       - name: Build and fully test factory image
         run: |
           ./build.py \
             --factory-image \
-            --work-dir "$RUNNER_TEMP/archlinuxarm-oci-work" \
+            --work-dir /tmp/archlinuxarm-oci-work \
             --rootfs-url "${{ needs.decide.outputs.rootfs_url }}" \
             --output "${{ steps.names.outputs.image }}"
 
@@ -203,7 +209,7 @@ jobs:
           (cd "$(dirname "$IMAGE")" && sha256sum "$image_name" > "$image_name.sha256")
           image_sha256="$(awk '{print $1}' "$IMAGE.sha256")"
           export IMAGE_NAME="$image_name" IMAGE_SHA256="$image_sha256"
-          python3 - "$RUNNER_TEMP/archlinuxarm-oci-work/build-state.json" \
+          python3 - /tmp/archlinuxarm-oci-work/build-state.json \
             "$(dirname "$IMAGE")/build-info.json" <<'PY'
           import json
           import os
@@ -263,6 +269,6 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
           path: |
-            ${{ runner.temp }}/archlinuxarm-oci-work/build-serial.log
-            ${{ runner.temp }}/archlinuxarm-oci-work/uefi-smoke-serial.log
-            ${{ runner.temp }}/archlinuxarm-oci-work/build-state.json
+            /tmp/archlinuxarm-oci-work/build-serial.log
+            /tmp/archlinuxarm-oci-work/uefi-smoke-serial.log
+            /tmp/archlinuxarm-oci-work/build-state.json

@@ -362,6 +362,9 @@ class RepositoryTests(unittest.TestCase):
         self.assertIn("SUPERMIN_KERNEL_VERSION", workflow)
         self.assertIn('sudo install -m 0644 "$runner_kernel" "$kernel"', workflow)
         self.assertIn('kernel_version="$(uname -r)"', workflow)
+        self.assertIn("--work-dir /tmp/archlinuxarm-oci-work", workflow)
+        self.assertNotIn('$RUNNER_TEMP/archlinuxarm-oci-work', workflow)
+        self.assertIn("findmnt -T /tmp", workflow)
 
     def test_host_dependency_installer_does_not_add_a_second_kernel(self):
         dependencies = (build.PROJECT / "install-deps.sh").read_text()
