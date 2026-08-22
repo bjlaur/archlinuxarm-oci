@@ -51,34 +51,43 @@ class ValidationTests(unittest.TestCase):
         self.assertEqual(rendered, "FAILED")
 
     def test_guestfish_logs_description_before_running(self):
-        builder = build.Builder(build.parse_args([]))
-        builder.raw = Path("/tmp/test-image.raw")
-        events = mock.Mock()
-        events.run.return_value = build.subprocess.CompletedProcess([], 0, "", "")
-        output = io.StringIO()
-        with (
-            mock.patch.object(build, "print_detail", events.detail),
-            mock.patch.object(build, "run", events.run),
-            mock.patch.object(sys, "stdout", output),
-        ):
-            builder.guestfish(
-                ["run", "mount-ro /dev/sda2 /", "cat /etc/passwd"],
-                description="inspecting the completed image",
-            )
+        with tempfile.TemporaryDirectory() as directory:
+            builder = build.Builder(build.parse_args(["--accel", "tcg"]))
+            builder.work = Path(directory)
+            builder.raw = builder.work / "test-image.raw"
+            events = mock.Mock()
+            events.run.return_value = build.subprocess.CompletedProcess([], 0, "", "")
+            output = io.StringIO()
+            with (
+                mock.patch.object(build, "print_detail", events.detail),
+                mock.patch.object(build, "run", events.run),
+                mock.patch.object(sys, "stdout", output),
+            ):
+                builder.guestfish(
+                    ["run", "mount-ro /dev/sda2 /", "cat /etc/passwd"],
+                    description="inspecting the completed image",
+                )
 
-        self.assertEqual(
-            events.mock_calls[0],
-            mock.call.detail("guestfish: inspecting the completed image"),
-        )
-        self.assertEqual(events.mock_calls[1][0], "run")
-        self.assertEqual(
-            events.run.call_args.kwargs["input_text"],
-            "run\nmount-ro /dev/sda2 /\ncat /etc/passwd\n",
-        )
-        self.assertEqual(
-            output.getvalue().splitlines(),
-            ["     stdin script:", "       run", "       mount-ro /dev/sda2 /", "       cat /etc/passwd"],
-        )
+            self.assertEqual(
+                events.mock_calls[0],
+                mock.call.detail("guestfish: inspecting the completed image"),
+            )
+            self.assertEqual(events.mock_calls[1][0], "run")
+            self.assertEqual(
+                events.run.call_args.kwargs["input_text"],
+                "run\nmount-ro /dev/sda2 /\ncat /etc/passwd\n",
+            )
+            guestfish_env = events.run.call_args.kwargs["env"]
+            expected_cache = f"{directory}/guestfs-cache/{build.platform.release()}"
+            self.assertEqual(guestfish_env["LIBGUESTFS_CACHEDIR"], expected_cache)
+            self.assertEqual(guestfish_env["LIBGUESTFS_TMPDIR"], f"{directory}/guestfs-tmp")
+            self.assertEqual(guestfish_env["TMPDIR"], f"{directory}/guestfs-tmp")
+            self.assertEqual(guestfish_env["XDG_RUNTIME_DIR"], f"{directory}/guestfs-runtime")
+            self.assertEqual(guestfish_env["LIBGUESTFS_BACKEND_SETTINGS"], "force_tcg")
+            self.assertEqual(
+                output.getvalue().splitlines(),
+                ["     stdin script:", "       run", "       mount-ro /dev/sda2 /", "       cat /etc/passwd"],
+            )
 
     def test_username(self):
         self.assertEqual(build.validate_username("admin_2"), "admin_2")

@@ -583,9 +583,25 @@ class Builder:
         env = os.environ.copy()
         env["LIBGUESTFS_BACKEND"] = "direct"
         if self.work is not None:
-            cache = self.work / "guestfs-cache"
-            cache.mkdir(exist_ok=True)
+            kernel_version = platform.release()
+            modules = Path("/lib/modules") / kernel_version
+            kernel = modules / "vmlinuz"
+            cache = self.work / "guestfs-cache" / kernel_version
+            temporary = self.work / "guestfs-tmp"
+            runtime = self.work / "guestfs-runtime"
+            for directory in (cache, temporary, runtime):
+                directory.mkdir(parents=True, exist_ok=True)
+            runtime.chmod(0o700)
             env["LIBGUESTFS_CACHEDIR"] = str(cache)
+            env["LIBGUESTFS_TMPDIR"] = str(temporary)
+            env["TMPDIR"] = str(temporary)
+            env["XDG_RUNTIME_DIR"] = str(runtime)
+            if kernel.is_file() and modules.is_dir():
+                env.setdefault("SUPERMIN_KERNEL", str(kernel))
+                env.setdefault("SUPERMIN_KERNEL_VERSION", kernel_version)
+                env.setdefault("SUPERMIN_MODULES", str(modules))
+        if self.args.accel == "tcg":
+            env["LIBGUESTFS_BACKEND_SETTINGS"] = "force_tcg"
         arguments: list[object] = [
             "guestfish", mode, f"--format={image_format}", "-a", target,
         ]
