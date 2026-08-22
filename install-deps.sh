@@ -23,6 +23,12 @@ elif command -v apt-get >/dev/null 2>&1; then
     packages=(
         python3 qemu-utils qemu-system-arm qemu-efi-aarch64 libguestfs-tools curl gnupg
     )
+    # supermin builds the libguestfs appliance from an installed host kernel.
+    # Minimal ARM64 environments (including GitHub's hosted ARM runner) may run
+    # an Azure kernel without providing a kernel image package for supermin.
+    case "$(uname -m)" in
+        aarch64|arm64) packages+=(linux-image-arm64) ;;
+    esac
     missing=()
     for pkg in "${packages[@]}"; do
         dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | grep -q 'ok installed' || missing+=("$pkg")

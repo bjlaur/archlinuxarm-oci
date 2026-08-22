@@ -358,6 +358,11 @@ class RepositoryTests(unittest.TestCase):
         self.assertIn("cancel-in-progress: false", workflow)
         self.assertNotIn("pull_request:", workflow)
         self.assertEqual(workflow.count("FORCE_REBUILD: ${{ inputs.force_rebuild }}"), 2)
+        self.assertIn("libguestfs-test-tool", workflow)
+
+    def test_arm_ubuntu_installs_kernel_for_supermin(self):
+        dependencies = (build.PROJECT / "install-deps.sh").read_text()
+        self.assertIn('aarch64|arm64) packages+=(linux-image-arm64)', dependencies)
 
     def test_factory_smoke_waits_for_cloud_init_with_extended_timeout(self):
         with tempfile.TemporaryDirectory() as directory:

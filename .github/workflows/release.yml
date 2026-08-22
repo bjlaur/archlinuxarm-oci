@@ -125,6 +125,13 @@ jobs:
       - name: Install build dependencies
         run: ./install-deps.sh
 
+      - name: Verify libguestfs appliance
+        run: |
+          if ! libguestfs-test-tool; then
+            echo "libguestfs self-test failed; rerunning with debug tracing" >&2
+            LIBGUESTFS_DEBUG=1 LIBGUESTFS_TRACE=1 libguestfs-test-tool
+          fi
+
       - name: Run source and environment checks
         run: |
           python3 -m unittest discover -s tests -v
