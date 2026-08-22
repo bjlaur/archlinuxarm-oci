@@ -56,3 +56,17 @@ Check the environment without downloading or building anything:
 ```bash
 ./build.py --check
 ```
+
+## Optional OCI deployment dependencies
+
+`deploy-oci.py` uses Python 3.8 or newer plus `curl`, `ssh`, `ssh-keygen`, and
+Oracle's `oci` CLI. It does not require the OCI Python SDK directly. A userland
+installation with `pipx` is sufficient:
+
+```bash
+pipx install oci-cli
+```
+
+New OCI users should start with
+[docs/OCI-PREPARATION.md](docs/OCI-PREPARATION.md), then continue with
+[docs/OCI-DEPLOYMENT.md](docs/OCI-DEPLOYMENT.md).

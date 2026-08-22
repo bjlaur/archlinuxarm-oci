@@ -1,4 +1,5 @@
 # No PyPI dependencies.
 # The Python tools use only the standard library; download-latest.py invokes
-# the host curl binary for progress, retries, and HTTPS transfers.
+# the host curl binary for progress, retries, and HTTPS transfers, while
+# deploy-oci.py invokes the optional host OCI CLI and OpenSSH clients.
 # Host/system packages are installed by ./install-deps.sh; see DEPENDENCIES.md.

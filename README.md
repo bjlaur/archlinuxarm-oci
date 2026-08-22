@@ -52,9 +52,10 @@ print("{}  {}".format(info["image_sha256"], info["image_filename"]))
 `build-info.json` records the project commit, upstream rootfs URL and checksum,
 pinned signing fingerprint, image checksum, and build/smoke acceleration modes.
 
-## Import and launch on OCI
+## Deploy on OCI
 
-Upload the QCOW2 to OCI Object Storage, then import it with:
+For a manual deployment, upload the QCOW2 to OCI Object Storage and import it
+with:
 
 ```text
 Image type:   QCOW2
@@ -70,6 +71,33 @@ instance boots, connect as:
 ```bash
 ssh alarm@INSTANCE_IP
 ```
+
+Alternatively, `deploy-oci.py` can automatically download and verify the latest
+image, import it, launch an A1 instance, and verify its first boot:
+
+```bash
+git clone https://github.com/bjlaur/archlinuxarm-oci.git
+cd archlinuxarm-oci
+pipx install oci-cli
+oci setup config
+```
+
+After registering the generated API public key and completing the one-time OCI
+IAM and network preparation, run the read-only check and then deploy:
+
+```bash
+./deploy-oci.py --assign-public-ip --dry-run
+./deploy-oci.py \
+  --assign-public-ip \
+  --reuse-download \
+  --verify-ssh \
+  --cleanup-object
+```
+
+See [Prepare OCI for deployment](docs/OCI-PREPARATION.md) for the one-time
+account, IAM, and network setup. See the full [OCI deployment
+guide](docs/OCI-DEPLOYMENT.md) for discovery behavior, overrides, resume,
+cleanup, and troubleshooting.
 
 The source disk is 4 GiB. `oci-grow-root.service` expands partition 2 and its
 ext4 filesystem when the instance uses a larger OCI boot volume.
@@ -215,6 +243,14 @@ Run them explicitly after changing `download-latest.py`:
 
 ```bash
 python3 tests/excluded_test_download_latest.py -v
+```
+
+The optional OCI CLI command-surface test is also excluded so normal source and
+image checks do not require OCI tooling or credentials. It reads local command
+help only and makes no API requests:
+
+```bash
+python3 tests/excluded_test_oci_cli.py -v
 ```
 
 Build progress is colorized on terminals. Redirected output is plain text; set

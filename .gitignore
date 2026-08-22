@@ -4,3 +4,6 @@
 *.sig
 __pycache__/
 *.pyc
+.deploy-oci-state.json
+.deploy-oci-state.json.known_hosts
+archlinuxarm-oci-download/

@@ -691,6 +691,25 @@ class RepositoryTests(unittest.TestCase):
         self.assertEqual(workflow.count("contents: read"), 1)
         self.assertEqual(workflow.count("contents: write"), 1)
 
+    def test_oci_guides_form_an_end_to_end_path(self):
+        preparation = (build.PROJECT / "docs/OCI-PREPARATION.md").read_text()
+        deployment = (build.PROJECT / "docs/OCI-DEPLOYMENT.md").read_text()
+        readme = (build.PROJECT / "README.md").read_text()
+        self.assertIn("OCI-DEPLOYMENT.md", preparation)
+        self.assertIn("OCI-PREPARATION.md", deployment)
+        self.assertIn("--dry-run", deployment)
+        self.assertIn("--reuse-download", deployment)
+        self.assertIn("--verify-ssh", deployment)
+        self.assertIn("--ssh-key PATH", deployment)
+        self.assertNotIn("--ssh-public-key", preparation + deployment)
+        self.assertNotIn("--ssh-private-key", preparation + deployment)
+        self.assertNotIn("BUCKET_NAME", preparation)
+        self.assertNotIn("export ", preparation + deployment)
+        self.assertIn("searches for accessible subnets", deployment)
+        self.assertIn("availability domains", deployment)
+        self.assertIn("OCI-PREPARATION.md", readme)
+        self.assertIn("OCI-DEPLOYMENT.md", readme)
+
     def test_release_workflow_smokes_the_uploaded_artifact_before_publish(self):
         workflow = self.release_workflow()
         self.assertIn("build-info.json", workflow)
