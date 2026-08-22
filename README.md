@@ -1,10 +1,7 @@
 # Arch Linux ARM for Oracle Cloud Infrastructure
 
 This project publishes a community-built Arch Linux ARM AArch64 factory image
-for Oracle Cloud Infrastructure Ampere A1 (`VM.Standard.A1.Flex`). The primary
-deliverable is the boot-tested QCOW2 image on the
-[latest GitHub Release](https://github.com/bjlaur/archlinuxarm-oci/releases/latest),
-not the build scripts in this repository.
+for Oracle Cloud Infrastructure Ampere A1 (`VM.Standard.A1.Flex`).
 
 The image is based on the signed official Arch Linux ARM generic AArch64
 rootfs. It is not an official Arch Linux or Arch Linux ARM image.
