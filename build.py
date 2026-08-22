@@ -584,10 +584,9 @@ class Builder:
             cache = self.work / "guestfs-cache"
             cache.mkdir(exist_ok=True)
             env["LIBGUESTFS_CACHEDIR"] = str(cache)
-        arguments: list[object] = ["guestfish", mode]
-        if not capture:
-            arguments.append("--progress-bars")
-        arguments.extend([f"--format={image_format}", "-a", target])
+        arguments: list[object] = [
+            "guestfish", mode, f"--format={image_format}", "-a", target,
+        ]
         return run(
             arguments,
             capture=capture,

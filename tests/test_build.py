@@ -149,16 +149,6 @@ class ValidationTests(unittest.TestCase):
 
 
 class ArchiveTests(unittest.TestCase):
-    def test_guestfish_progress_for_visible_operations_only(self):
-        builder = build.Builder(build.parse_args([]))
-        builder.raw = Path("/tmp/test-image.raw")
-        completed = build.subprocess.CompletedProcess(["guestfish"], 0, stdout="", stderr="")
-        with mock.patch.object(build, "run", return_value=completed) as invoked:
-            builder.guestfish(["run"])
-            self.assertIn("--progress-bars", invoked.call_args.args[0])
-            builder.guestfish(["run"], capture=True)
-            self.assertNotIn("--progress-bars", invoked.call_args.args[0])
-
     def test_factory_build_skips_credentials(self):
         builder = build.Builder(build.parse_args(["--factory-image"]))
         events: list[str] = []
