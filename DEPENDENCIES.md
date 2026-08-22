@@ -30,6 +30,10 @@ On native ARM64 Ubuntu hosts, `install-deps.sh` also installs
 libguestfs appliance; minimal and hosted ARM environments may not otherwise
 provide one.
 
+The release workflow uses supermin's documented kernel-selection environment
+variables to choose that readable generic kernel instead of the hosted runner's
+newer, unreadable Azure boot kernel.
+
 ## Required commands
 
 - `qemu-system-aarch64`: runs the disposable ARM build VM and UEFI smoke test.

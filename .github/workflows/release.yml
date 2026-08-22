@@ -125,8 +125,29 @@ jobs:
       - name: Install build dependencies
         run: ./install-deps.sh
 
-      - name: Verify libguestfs appliance
+      - name: Configure and verify libguestfs appliance
         run: |
+          kernel="$(find /boot -maxdepth 1 -type f -readable -name 'vmlinuz-*-generic' \
+            -printf '%T@ %p\n' | sort -nr | awk 'NR == 1 {print $2}')"
+          if [[ -z "$kernel" ]]; then
+            echo "No readable generic kernel is available for supermin." >&2
+            exit 1
+          fi
+          kernel_version="${kernel##*/vmlinuz-}"
+          modules="/lib/modules/$kernel_version"
+          if [[ ! -d "$modules" ]]; then
+            echo "Kernel modules are missing for $kernel_version." >&2
+            exit 1
+          fi
+          {
+            echo "SUPERMIN_KERNEL=$kernel"
+            echo "SUPERMIN_KERNEL_VERSION=$kernel_version"
+            echo "SUPERMIN_MODULES=$modules"
+          } >> "$GITHUB_ENV"
+          export SUPERMIN_KERNEL="$kernel"
+          export SUPERMIN_KERNEL_VERSION="$kernel_version"
+          export SUPERMIN_MODULES="$modules"
+          echo "libguestfs appliance kernel: $kernel_version"
           if ! libguestfs-test-tool; then
             echo "libguestfs self-test failed; rerunning with debug tracing" >&2
             LIBGUESTFS_DEBUG=1 LIBGUESTFS_TRACE=1 libguestfs-test-tool
