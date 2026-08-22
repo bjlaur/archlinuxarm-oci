@@ -340,7 +340,9 @@ class Builder:
 
     def qemu_machine_args(self) -> list[object]:
         accel = self.select_acceleration()
-        cpu = "host" if accel == "kvm" else "max"
+        # QEMU 8.2's TCG implementation can fault when a guest uses FEAT_MOPS.
+        # Neoverse-N1 predates MOPS and remains a representative server CPU.
+        cpu = "host" if accel == "kvm" else "neoverse-n1"
         return ["-machine", f"virt,accel={accel}", "-cpu", cpu]
 
     def bind_workspace(self, work: Path) -> None:

@@ -10,6 +10,11 @@ on:
         required: false
         type: boolean
         default: false
+      smoke_source_run_id:
+        description: Smoke-test the factory image artifact from this prior run ID instead of building
+        required: false
+        type: string
+        default: ""
   push:
     branches: [main]
     paths:
@@ -24,6 +29,7 @@ on:
       - .github/workflows/release.yml
 
 permissions:
+  actions: read
   contents: write
 
 concurrency:
@@ -32,6 +38,7 @@ concurrency:
 
 jobs:
   decide:
+    if: inputs.smoke_source_run_id == ''
     runs-on: ubuntu-24.04
     outputs:
       should_build: ${{ steps.decision.outputs.should_build }}
@@ -386,3 +393,62 @@ jobs:
             "$release_dir/build-info.json" \
             --title "Arch Linux ARM OCI Image — ${{ needs.build.outputs.build_date }}" \
             --notes-file "$release_dir/release-notes.md"
+
+  smoke-existing:
+    if: github.event_name == 'workflow_dispatch' && inputs.smoke_source_run_id != ''
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install smoke-test dependencies
+        run: ./install-deps.sh
+
+      - name: Configure and verify libguestfs appliance
+        run: |
+          kernel_version="$(uname -r)"
+          runner_kernel="/boot/vmlinuz-$kernel_version"
+          kernel="$RUNNER_TEMP/libguestfs-vmlinuz-$kernel_version"
+          modules="/lib/modules/$kernel_version"
+          if [[ ! -f "$runner_kernel" || ! -d "$modules" ]]; then
+            echo "The running kernel or its modules are unavailable for libguestfs." >&2
+            exit 1
+          fi
+          sudo install -m 0644 "$runner_kernel" "$kernel"
+          {
+            echo "SUPERMIN_KERNEL=$kernel"
+            echo "SUPERMIN_KERNEL_VERSION=$kernel_version"
+            echo "SUPERMIN_MODULES=$modules"
+          } >> "$GITHUB_ENV"
+          export SUPERMIN_KERNEL="$kernel"
+          export SUPERMIN_KERNEL_VERSION="$kernel_version"
+          export SUPERMIN_MODULES="$modules"
+          echo "libguestfs appliance kernel: $kernel_version"
+          if ! libguestfs-test-tool; then
+            echo "libguestfs self-test failed; rerunning with debug tracing" >&2
+            LIBGUESTFS_DEBUG=1 LIBGUESTFS_TRACE=1 libguestfs-test-tool
+          fi
+
+      - name: Download image artifact from prior run
+        uses: actions/download-artifact@v4
+        with:
+          name: factory-image-${{ inputs.smoke_source_run_id }}
+          path: /tmp/archlinuxarm-oci-smoke
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.smoke_source_run_id }}
+
+      - name: Smoke-test existing QCOW2 artifact
+        run: |
+          ./build.py \
+            --work-dir /tmp/archlinuxarm-oci-smoke \
+            --smoke-test-only
+
+      - name: Upload smoke results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: factory-smoke-retest-${{ github.run_id }}
+          if-no-files-found: ignore
+          retention-days: 7
+          path: |
+            /tmp/archlinuxarm-oci-smoke/build-state.json
+            /tmp/archlinuxarm-oci-smoke/uefi-smoke-serial.log

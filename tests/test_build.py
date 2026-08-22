@@ -156,7 +156,10 @@ class ValidationTests(unittest.TestCase):
 
     def test_acceleration_qemu_arguments_are_shared(self):
         builder = build.Builder(build.parse_args(["--accel", "tcg"]))
-        self.assertEqual(builder.qemu_machine_args(), ["-machine", "virt,accel=tcg", "-cpu", "max"])
+        self.assertEqual(
+            builder.qemu_machine_args(),
+            ["-machine", "virt,accel=tcg", "-cpu", "neoverse-n1"],
+        )
         builder = build.Builder(build.parse_args(["--accel", "kvm"]))
         with mock.patch.object(builder, "probe_kvm", return_value=True):
             self.assertEqual(builder.qemu_machine_args(), ["-machine", "virt,accel=kvm", "-cpu", "host"])
@@ -498,6 +501,10 @@ class RepositoryTests(unittest.TestCase):
         self.assertIn("needs: [decide, build]", workflow)
         self.assertIn("needs: [decide, build, smoke]", workflow)
         self.assertIn("Smoke-test downloaded QCOW2 artifact", workflow)
+        self.assertIn("smoke_source_run_id:", workflow)
+        self.assertIn("run-id: ${{ inputs.smoke_source_run_id }}", workflow)
+        self.assertIn("name: factory-image-${{ inputs.smoke_source_run_id }}", workflow)
+        self.assertIn("Smoke-test existing QCOW2 artifact", workflow)
         self.assertLess(
             workflow.index("Upload converted image for smoke testing"),
             workflow.index("Smoke-test downloaded QCOW2 artifact"),
