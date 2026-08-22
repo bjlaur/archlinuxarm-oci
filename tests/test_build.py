@@ -651,6 +651,10 @@ class RepositoryTests(unittest.TestCase):
     def release_workflow() -> str:
         return (build.PROJECT / ".github/workflows/release.yml").read_text()
 
+    @staticmethod
+    def upstream_workflow() -> str:
+        return (build.PROJECT / ".github/workflows/check-upstream.yml").read_text()
+
     def test_release_workflow_is_image_focused_without_general_ci(self):
         workflow = self.release_workflow()
         self.assertFalse((build.PROJECT / ".github/workflows/ci.yml").exists())
@@ -659,11 +663,24 @@ class RepositoryTests(unittest.TestCase):
         self.assertIn("ArchLinuxARM-aarch64", build.DEFAULT_ROOTFS_URL)
         self.assertIn("cancel-in-progress: false", workflow)
         self.assertNotIn("pull_request:", workflow)
+        self.assertNotIn("schedule:", workflow)
+        self.assertNotIn("push:", workflow)
         self.assertEqual(workflow.count("FORCE_REBUILD: ${{ inputs.force_rebuild }}"), 2)
         self.assertNotIn("latest_sha", workflow)
         self.assertNotIn('"$GITHUB_SHA" !=', workflow)
         self.assertNotIn("project-or-upstream-changed", workflow)
         self.assertIn('elif [[ "$checksum" != "$latest_md5" ]]; then', workflow)
+
+    def test_scheduled_checker_dispatches_only_for_an_upstream_change(self):
+        workflow = self.upstream_workflow()
+        self.assertIn("name: Check for Arch Linux ARM rootfs update", workflow)
+        self.assertIn("schedule:", workflow)
+        self.assertIn("workflow_dispatch:", workflow)
+        self.assertIn("actions: write", workflow)
+        self.assertIn("reason=already-released", workflow)
+        self.assertIn("reason=upstream-rootfs-changed", workflow)
+        self.assertIn("if: steps.decision.outputs.dispatch == 'true'", workflow)
+        self.assertIn("gh workflow run release.yml --ref main", workflow)
 
     def test_release_workflow_uses_minimal_libguestfs_setup_and_permissions(self):
         workflow = self.release_workflow()
@@ -701,10 +718,7 @@ class RepositoryTests(unittest.TestCase):
         self.assertIn("publish_release:", workflow)
         self.assertIn("PUBLISH_RELEASE: ${{ inputs.publish_release }}", workflow)
         self.assertIn('"$PUBLISH_RELEASE" == true', workflow)
-        self.assertIn(
-            "if: github.event_name != 'workflow_dispatch' || inputs.publish_release",
-            workflow,
-        )
+        self.assertIn("if: inputs.publish_release", workflow)
 
     def test_ci_libguestfs_setup_only_copies_the_hosted_runner_kernel(self):
         helper = (build.PROJECT / "ci/prepare-libguestfs.sh").read_text()

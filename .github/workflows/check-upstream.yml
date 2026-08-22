@@ -1,0 +1,81 @@
+name: Check for Arch Linux ARM rootfs update
+run-name: Check for Arch Linux ARM rootfs update
+
+on:
+  schedule:
+    - cron: "17 7 * * *"
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: read
+
+concurrency:
+  group: archlinuxarm-oci-upstream-check
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Compare upstream rootfs with the latest release
+        id: decision
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          rootfs_url="$(python3 -c 'import build; print(build.DEFAULT_ROOTFS_URL)')"
+          checksum="$(curl -fsSL --retry 3 "${rootfs_url}.md5" | awk 'NR == 1 {print tolower($1)}')"
+          if [[ ! "$checksum" =~ ^[0-9a-f]{32}$ ]]; then
+            echo "Invalid upstream MD5 response for ${rootfs_url}.md5" >&2
+            exit 1
+          fi
+
+          latest_md5=""
+          latest_tag="$(gh release view --json tagName --jq .tagName 2>/dev/null || true)"
+          if [[ -n "$latest_tag" ]]; then
+            mkdir -p "$RUNNER_TEMP/latest-release"
+            if gh release download "$latest_tag" --pattern build-info.json \
+                 --dir "$RUNNER_TEMP/latest-release" >/dev/null 2>&1; then
+              latest_md5="$(python3 - "$RUNNER_TEMP/latest-release/build-info.json" <<'PY' || true
+          import json
+          import re
+          import sys
+
+          try:
+              md5 = json.load(open(sys.argv[1], encoding="utf-8"))["upstream_md5"].lower()
+              if not re.fullmatch(r"[0-9a-f]{32}", md5):
+                  raise ValueError("invalid MD5")
+              print(md5)
+          except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+              pass
+          PY
+              )"
+            fi
+          fi
+
+          dispatch=false
+          reason=already-released
+          if [[ -z "$latest_md5" ]]; then
+            dispatch=true
+            reason=no-valid-previous-release
+          elif [[ "$checksum" != "$latest_md5" ]]; then
+            dispatch=true
+            reason=upstream-rootfs-changed
+          fi
+
+          echo "dispatch=$dispatch" >> "$GITHUB_OUTPUT"
+          echo "reason=$reason" >> "$GITHUB_OUTPUT"
+          echo "Current upstream MD5: $checksum" >> "$GITHUB_STEP_SUMMARY"
+          echo "Latest release MD5: ${latest_md5:-unavailable}" >> "$GITHUB_STEP_SUMMARY"
+          echo "Decision: dispatch=$dispatch reason=$reason" >> "$GITHUB_STEP_SUMMARY"
+          echo "::notice title=Upstream check::dispatch=$dispatch reason=$reason"
+
+      - name: Dispatch factory image release
+        if: steps.decision.outputs.dispatch == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run release.yml --ref main

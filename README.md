@@ -100,11 +100,13 @@ is enabled.
 
 ## Automated releases
 
-A lightweight scheduled job checks the small checksum file adjacent to the
-upstream rootfs. A complete factory image is built when that rootfs changes or
-when a rebuild is manually forced. Repository commits do not automatically
-replace an existing release; maintainers force a rebuild when code changes
-require a new image.
+The lightweight `Check for Arch Linux ARM rootfs update` workflow checks the
+small checksum file adjacent to the upstream rootfs each day. When the checksum
+changes, it dispatches the separate `Build and publish factory image` workflow.
+The release workflow can also be started manually with a forced rebuild.
+Repository commits do not run either workflow or automatically replace an
+existing release; maintainers force a rebuild when code changes require a new
+image.
 
 Every published image must pass:
 

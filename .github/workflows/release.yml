@@ -1,8 +1,10 @@
 name: Build and publish factory image
+run-name: >-
+  ${{ inputs.smoke_source_run_id != '' && 'Smoke-test existing factory image' ||
+      inputs.publish_release == false && 'Build and smoke factory image (no release)' ||
+      'Build and publish factory image' }}
 
 on:
-  schedule:
-    - cron: "17 7 * * *"
   workflow_dispatch:
     inputs:
       force_rebuild:
@@ -20,17 +22,6 @@ on:
         required: false
         type: string
         default: ""
-  push:
-    branches: [main]
-    paths:
-      - build.py
-      - guest/**
-      - overlay/**
-      - templates/**
-      - ci/**
-      - install-deps.sh
-      - .github/workflows/release.yml
-
 permissions:
   actions: read
   contents: read
@@ -257,7 +248,7 @@ jobs:
 
   publish:
     needs: [decide, build, smoke]
-    if: github.event_name != 'workflow_dispatch' || inputs.publish_release
+    if: inputs.publish_release
     runs-on: ubuntu-24.04
     permissions:
       actions: read
