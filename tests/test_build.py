@@ -660,6 +660,10 @@ class RepositoryTests(unittest.TestCase):
         self.assertIn("cancel-in-progress: false", workflow)
         self.assertNotIn("pull_request:", workflow)
         self.assertEqual(workflow.count("FORCE_REBUILD: ${{ inputs.force_rebuild }}"), 2)
+        self.assertNotIn("latest_sha", workflow)
+        self.assertNotIn('"$GITHUB_SHA" !=', workflow)
+        self.assertNotIn("project-or-upstream-changed", workflow)
+        self.assertIn('elif [[ "$checksum" != "$latest_md5" ]]; then', workflow)
 
     def test_release_workflow_uses_minimal_libguestfs_setup_and_permissions(self):
         workflow = self.release_workflow()

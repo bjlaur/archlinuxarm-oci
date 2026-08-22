@@ -73,7 +73,6 @@ jobs:
             exit 1
           fi
 
-          latest_sha=""
           latest_md5=""
           latest_tag="$(gh release view --json tagName --jq .tagName 2>/dev/null || true)"
           if [[ -n "$latest_tag" ]]; then
@@ -87,19 +86,16 @@ jobs:
 
           try:
               data = json.load(open(sys.argv[1], encoding="utf-8"))
-              sha = data["git_sha"]
               md5 = data["upstream_md5"].lower()
-              if not re.fullmatch(r"[0-9a-f]{40}", sha):
-                  raise ValueError("invalid git SHA")
               if not re.fullmatch(r"[0-9a-f]{32}", md5):
                   raise ValueError("invalid MD5")
-              print(sha, md5)
+              print(md5)
           except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
               pass
           PY
               )"
               if [[ -n "$parsed" ]]; then
-                read -r latest_sha latest_md5 <<<"$parsed"
+                latest_md5="$parsed"
               fi
             fi
           fi
@@ -109,16 +105,12 @@ jobs:
           if [[ "$FORCE_REBUILD" == true ]]; then
             should_build=true
             reason=manual-force
-          elif [[ -z "$latest_sha" || -z "$latest_md5" ]]; then
+          elif [[ -z "$latest_md5" ]]; then
             should_build=true
             reason=no-valid-previous-release
-          elif [[ "$GITHUB_EVENT_NAME" == schedule && "$checksum" != "$latest_md5" ]]; then
+          elif [[ "$checksum" != "$latest_md5" ]]; then
             should_build=true
             reason=upstream-rootfs-changed
-          elif [[ "$GITHUB_EVENT_NAME" != schedule && \
-                  ("$GITHUB_SHA" != "$latest_sha" || "$checksum" != "$latest_md5") ]]; then
-            should_build=true
-            reason=project-or-upstream-changed
           fi
 
           echo "should_build=$should_build" >> "$GITHUB_OUTPUT"

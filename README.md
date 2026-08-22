@@ -101,9 +101,10 @@ is enabled.
 ## Automated releases
 
 A lightweight scheduled job checks the small checksum file adjacent to the
-upstream rootfs. A complete factory image is built when that rootfs changes,
-when image-affecting code changes on `main`, or when a rebuild is manually
-forced.
+upstream rootfs. A complete factory image is built when that rootfs changes or
+when a rebuild is manually forced. Repository commits do not automatically
+replace an existing release; maintainers force a rebuild when code changes
+require a new image.
 
 Every published image must pass:
 
