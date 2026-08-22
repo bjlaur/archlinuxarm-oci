@@ -49,6 +49,3 @@ Check the environment without downloading or building anything:
 ```bash
 ./build.py --check
 ```
-
-`legacy-build.py` is retained temporarily for comparison. It has the older,
-privileged dependency set and is not the supported public build path.

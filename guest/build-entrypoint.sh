@@ -21,7 +21,7 @@ trap fail ERR
 
 [[ "$(uname -m)" == aarch64 ]]
 [[ "$(findmnt -n -o SOURCE /)" == /dev/vda2 ]]
-[[ "$(cat /sys/block/vda/device/serial)" == OCIARCHBUILDER ]]
+[[ "$(cat /sys/block/vda/serial)" == OCIARCHBUILDER ]]
 
 "$builder/configure.sh" "$admin_user"
 
@@ -54,7 +54,6 @@ done
 
 ssh-keygen -A
 sshd -t
-nft -c -f /etc/nftables.conf
 
 truncate -s 0 /etc/machine-id
 rm -f /var/lib/systemd/random-seed /etc/ssh/ssh_host_*

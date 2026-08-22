@@ -9,8 +9,7 @@ admin_user="$1"
 
 pacman-key --init
 pacman-key --populate archlinuxarm
-pacman -Syu --noconfirm
-pacman -S --needed --noconfirm \
+pacman -Sy --needed --noconfirm \
     grub efibootmgr dosfstools sudo nftables sshguard cloud-guest-utils \
     gptfdisk e2fsprogs openssh vim
 

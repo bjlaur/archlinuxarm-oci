@@ -32,11 +32,11 @@ expected="$(printf '%s\n' root "$admin_user" | sort)"
 ssh-keygen -A
 sshd -t
 effective="$(sshd -T)"
-grep -qx "allowusers $admin_user" <<<"$effective"
-grep -qx 'passwordauthentication yes' <<<"$effective"
-grep -qx 'pubkeyauthentication no' <<<"$effective"
-grep -qx 'kbdinteractiveauthentication no' <<<"$effective"
-grep -qx 'permitrootlogin no' <<<"$effective"
+grep -Fqxi "allowusers $admin_user" <<<"$effective"
+grep -Fqxi 'passwordauthentication yes' <<<"$effective"
+grep -Fqxi 'pubkeyauthentication no' <<<"$effective"
+grep -Fqxi 'kbdinteractiveauthentication no' <<<"$effective"
+grep -Fqxi 'permitrootlogin no' <<<"$effective"
 nft -c -f /etc/nftables.conf
 systemctl is-enabled sshd.service systemd-networkd.service systemd-resolved.service nftables.service sshguard.service oci-grow-root.service >/dev/null
 

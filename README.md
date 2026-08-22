@@ -46,9 +46,10 @@ There is no `sudo` prompt. The builder uses:
    configuration; and
 3. a disposable QCOW2 overlay for a real AArch64 UEFI boot smoke test.
 
-The normal build prompts for the admin username, root password, and admin
-password. Password input is handled on the QEMU serial terminal and is not
-echoed or written into build files/logs.
+The normal build prompts for the admin username, then separately prompts and
+confirms the root and administrator passwords before starting any build work.
+Passwords are retained only in process memory, automatically supplied to the
+guest's `passwd` prompts, and never echoed or written into build files/logs.
 
 Default output:
 
@@ -63,6 +64,31 @@ Useful options:
 ./build.py --image-size 10G --output archlinuxarm-oci.qcow2
 ./build.py --keep-work
 ```
+
+### Staged and resumable builds
+
+Use `--work-dir` to place every intermediate artifact in an exact directory.
+An explicit workspace is always retained. New build workspaces must be empty;
+the stage-only modes resume an existing workspace:
+
+```bash
+./build.py --work-dir /path/to/oci-work --build-only --username myadmin
+./build.py --work-dir /path/to/oci-work --smoke-test-only
+./build.py --work-dir /path/to/oci-work --convert-only --output archlinuxarm-oci.qcow2
+```
+
+`--build-only` creates and validates the raw disk. `--smoke-test-only` boots
+that disk through UEFI using a disposable overlay. `--convert-only` performs
+the final raw-to-compressed-QCOW2 conversion and refuses to run unless the
+workspace records a successful smoke test for the unchanged raw disk. QCOW2
+clusters are compressed with zstd.
+
+This is also useful when `/tmp` is backed by RAM: choose a workspace on a
+disk-backed filesystem instead.
+
+Build progress is color-coded when standard output or standard error is a
+terminal. Redirected output remains plain text. Set `NO_COLOR=1` to disable
+colors explicitly.
 
 ### Automated test password
 
@@ -118,11 +144,9 @@ break-glass access with the root password.
 
 ```text
 build.py                 rootless host orchestration
-legacy-build.py          retained older sudo/loop implementation
 install-deps.sh          installs only missing host packages
 guest/                   commands run inside the AArch64 build/smoke VMs
 overlay/                 static files copied into the image
 templates/               build-time UUID/username substitutions
 tests/                   host-side unit and password-PTY tests
-CODEX_HANDOFF.md         design and troubleshooting handoff
 ```
