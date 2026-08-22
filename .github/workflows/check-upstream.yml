@@ -4,6 +4,8 @@ run-name: Check for Arch Linux ARM rootfs update
 on:
   schedule:
     - cron: "17 7 * * *"
+  push:
+    branches: [main]
   workflow_dispatch:
 
 permissions:

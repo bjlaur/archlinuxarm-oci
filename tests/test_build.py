@@ -675,6 +675,8 @@ class RepositoryTests(unittest.TestCase):
         workflow = self.upstream_workflow()
         self.assertIn("name: Check for Arch Linux ARM rootfs update", workflow)
         self.assertIn("schedule:", workflow)
+        self.assertIn("push:", workflow)
+        self.assertIn("branches: [main]", workflow)
         self.assertIn("workflow_dispatch:", workflow)
         self.assertIn("actions: write", workflow)
         self.assertIn("reason=already-released", workflow)
