@@ -50,6 +50,36 @@ class ValidationTests(unittest.TestCase):
             rendered = build.colorize("FAILED", build.ANSI_RED, stream=TerminalBuffer())
         self.assertEqual(rendered, "FAILED")
 
+    def test_guestfish_logs_description_before_running(self):
+        builder = build.Builder(build.parse_args([]))
+        builder.raw = Path("/tmp/test-image.raw")
+        events = mock.Mock()
+        events.run.return_value = build.subprocess.CompletedProcess([], 0, "", "")
+        output = io.StringIO()
+        with (
+            mock.patch.object(build, "print_detail", events.detail),
+            mock.patch.object(build, "run", events.run),
+            mock.patch.object(sys, "stdout", output),
+        ):
+            builder.guestfish(
+                ["run", "mount-ro /dev/sda2 /", "cat /etc/passwd"],
+                description="inspecting the completed image",
+            )
+
+        self.assertEqual(
+            events.mock_calls[0],
+            mock.call.detail("guestfish: inspecting the completed image"),
+        )
+        self.assertEqual(events.mock_calls[1][0], "run")
+        self.assertEqual(
+            events.run.call_args.kwargs["input_text"],
+            "run\nmount-ro /dev/sda2 /\ncat /etc/passwd\n",
+        )
+        self.assertEqual(
+            output.getvalue().splitlines(),
+            ["     stdin script:", "       run", "       mount-ro /dev/sda2 /", "       cat /etc/passwd"],
+        )
+
     def test_username(self):
         self.assertEqual(build.validate_username("admin_2"), "admin_2")
         for invalid in ("root", "alarm", "Admin", "two words", "-admin", ""):
@@ -242,7 +272,7 @@ class ArchiveTests(unittest.TestCase):
             builder.cleanup()
             self.assertTrue(workspace.is_dir())
 
-    def test_workspace_state_tracks_smoke_and_raw_identity(self):
+    def test_workspace_state_tracks_raw_identity(self):
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)
             args = build.parse_args(["--work-dir", str(workspace), "--convert-only"])
@@ -253,14 +283,10 @@ class ArchiveTests(unittest.TestCase):
             builder.raw.write_bytes(b"raw-image")
             builder.write_state(root_uuid="root-uuid", smoke_passed=False)
 
-            with self.assertRaisesRegex(RuntimeError, "no successful smoke test"):
-                builder.require_matching_state(require_smoke=True)
-
-            builder.write_state(root_uuid="root-uuid", smoke_passed=True)
-            builder.require_matching_state(require_smoke=True)
+            builder.require_matching_state()
             builder.raw.write_bytes(b"changed-image")
             with self.assertRaisesRegex(RuntimeError, "raw disk changed"):
-                builder.require_matching_state(require_smoke=True)
+                builder.require_matching_state()
 
     def test_converted_image_is_portable_with_workspace_and_checksum(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -339,7 +365,7 @@ class ArchiveTests(unittest.TestCase):
 
             resumed = build.Builder(build.parse_args(["--work-dir", str(workspace), "--convert-only"]))
             resumed.start_workspace(resume=True)
-            resumed.require_matching_state(require_smoke=True)
+            resumed.require_matching_state()
             self.assertEqual((resumed.build_mode, resumed.admin_user), ("factory", "alarm"))
 
             state = resumed.load_state()
@@ -388,7 +414,6 @@ class ArchiveTests(unittest.TestCase):
         builder = build.Builder(build.parse_args(["--factory-image"]))
         builder.admin_user = "alarm"
         files = {
-            "/var/lib/archlinuxarm-oci/build-success": "OCI_IMAGE_BUILD_SUCCESS\n",
             "/etc/passwd": (
                 "root:x:0:0::/root:/usr/bin/bash\n"
                 "alarm:x:1000:1000::/home/alarm:/bin/bash\n"

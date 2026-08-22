@@ -68,6 +68,10 @@ def print_stage(message: str) -> None:
     print(colorize(f"==> {message}", ANSI_BOLD_BLUE))
 
 
+def print_detail(message: str) -> None:
+    print(colorize(f"  -> {message}", ANSI_DIM_CYAN), flush=True)
+
+
 def run(argv: list[object], *, capture: bool = False, input_text: str | None = None,
         env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
     args = [str(item) for item in argv]
@@ -412,9 +416,7 @@ class Builder:
             "build_accel": self.build_accel,
             "smoke_accel": self.smoke_accel,
         }
-        temporary = self.state_file.with_suffix(".json.tmp")
-        temporary.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n")
-        os.replace(temporary, self.state_file)
+        self.update_state(state)
 
     def update_state(self, state: dict[str, object]) -> None:
         assert self.state_file
@@ -431,7 +433,7 @@ class Builder:
         return digest.hexdigest()
 
     def record_conversion(self, digest: str) -> None:
-        state = self.require_matching_state(require_smoke=False)
+        state = self.require_matching_state()
         state.update({
             "stage": "converted",
             "smoke_passed": False,
@@ -505,17 +507,15 @@ class Builder:
         self.build_accel = build_accel if isinstance(build_accel, str) else None
         self.smoke_accel = smoke_accel if isinstance(smoke_accel, str) else None
 
-    def require_matching_state(self, *, require_smoke: bool) -> dict[str, object]:
+    def require_matching_state(self) -> dict[str, object]:
         state = self.load_state()
         if state is None:
             raise RuntimeError(
-                f"workspace has no build-state.json; run --smoke-test-only first: {self.work}"
+                f"workspace has no build-state.json; run --build-only first: {self.work}"
             )
         if state.get("raw") != self.raw_identity():
             raise RuntimeError("raw disk changed since the workspace state was recorded")
         self.adopt_state(state)
-        if require_smoke and state.get("smoke_passed") is not True:
-            raise RuntimeError("workspace has no successful smoke test for the current raw disk")
         return state
 
     def confirm_output(self) -> None:
@@ -571,7 +571,7 @@ class Builder:
             if missing:
                 raise RuntimeError("verified rootfs is missing direct-boot files: " + ", ".join(missing))
 
-    def guestfish(self, commands: list[str], *, image: Path | None = None,
+    def guestfish(self, commands: list[str], *, description: str, image: Path | None = None,
                   image_format: str = "raw", read_only: bool = False,
                   capture: bool = False) -> subprocess.CompletedProcess[str]:
         target = image or self.raw
@@ -587,6 +587,10 @@ class Builder:
         arguments: list[object] = [
             "guestfish", mode, f"--format={image_format}", "-a", target,
         ]
+        print_detail(f"guestfish: {description}")
+        print(colorize("     stdin script:", ANSI_DIM_CYAN))
+        for line in commands:
+            print(colorize(f"       {line}", ANSI_DIM_CYAN))
         return run(
             arguments,
             capture=capture,
@@ -616,13 +620,18 @@ class Builder:
             f"tar-in {guestfish_quote(self.rootfs)} / compress:gzip xattrs:true acls:true",
             "sync",
             "umount-all",
-        ])
+        ], description="partitioning, formatting, and importing the root filesystem")
         root_uuid = self.read_uuid("/dev/sda2")
         esp_uuid = self.read_uuid("/dev/sda1")
         return root_uuid, esp_uuid
 
     def read_uuid(self, device: str) -> str:
-        result = self.guestfish(["run", f"vfs-uuid {device}"], read_only=True, capture=True)
+        result = self.guestfish(
+            ["run", f"vfs-uuid {device}"],
+            description=f"reading the filesystem UUID from {device}",
+            read_only=True,
+            capture=True,
+        )
         values = [line.strip() for line in result.stdout.splitlines() if re.fullmatch(r"[0-9A-Fa-f-]{4,}", line.strip())]
         if not values:
             raise RuntimeError(f"could not read filesystem UUID for {device}: {result.stdout!r}")
@@ -716,7 +725,7 @@ class Builder:
             f"tar-in {guestfish_quote(payload)} / compress:gzip xattrs:true acls:true",
             "sync",
             "umount-all",
-        ])
+        ], description="installing the image-build payload")
 
     def direct_boot_args(self) -> list[object]:
         assert self.raw and self.kernel and self.initramfs
@@ -756,6 +765,7 @@ class Builder:
                         image_format: str = "raw") -> str:
         result = self.guestfish(
             ["run", "mount-ro /dev/sda2 /", f"cat {path}"],
+            description=f"reading {path}",
             image=image, image_format=image_format, read_only=True, capture=True,
         )
         return result.stdout
@@ -764,6 +774,7 @@ class Builder:
                           image_format: str = "raw") -> bool:
         result = self.guestfish(
             ["run", "mount-ro /dev/sda2 /", f"exists {path}"],
+            description=f"checking whether {path} exists",
             image=image, image_format=image_format, read_only=True, capture=True,
         )
         values = [line.strip() for line in result.stdout.splitlines() if line.strip() in {"true", "false"}]
@@ -775,6 +786,7 @@ class Builder:
                    image_format: str = "raw") -> list[str]:
         result = self.guestfish(
             ["run", "mount-ro /dev/sda2 /", f"glob echo {pattern}"],
+            description=f"checking for paths matching {pattern}",
             image=image, image_format=image_format, read_only=True, capture=True,
         )
         return [
@@ -786,6 +798,7 @@ class Builder:
                         image_format: str = "raw") -> int:
         result = self.guestfish(
             ["run", "mount-ro /dev/sda2 /", f"filesize {guestfish_quote(path)}"],
+            description=f"reading the size of {path}",
             image=image, image_format=image_format, read_only=True, capture=True,
         )
         values = [line.strip() for line in result.stdout.splitlines() if line.strip()]
@@ -793,15 +806,14 @@ class Builder:
             raise RuntimeError(f"could not inspect guest file size: {path}")
         return int(values[-1])
 
-    def validate_built_image(self, *, require_marker: bool = True,
-                             image: Path | None = None, image_format: str = "raw") -> None:
+    def verify_build_marker(self) -> None:
+        marker = self.read_guest_file("/var/lib/archlinuxarm-oci/build-success").strip()
+        if marker != BUILD_SUCCESS.decode():
+            raise RuntimeError(f"missing durable build marker: {marker!r}")
+
+    def validate_built_image(self, *, image: Path | None = None,
+                             image_format: str = "raw") -> None:
         assert self.admin_user
-        if require_marker:
-            marker = self.read_guest_file(
-                "/var/lib/archlinuxarm-oci/build-success", image=image, image_format=image_format
-            ).strip()
-            if marker != BUILD_SUCCESS.decode():
-                raise RuntimeError(f"missing durable build marker: {marker!r}")
         passwd = self.read_guest_file("/etc/passwd", image=image, image_format=image_format)
         interactive: list[str] = []
         for line in passwd.splitlines():
@@ -889,7 +901,7 @@ class Builder:
     def remove_build_marker(self) -> None:
         self.guestfish([
             "run", "mount /dev/sda2 /", "rm-f /var/lib/archlinuxarm-oci/build-success", "sync", "umount-all"
-        ])
+        ], description="removing the temporary build-success marker")
 
     def sanitize_factory_image(self) -> None:
         """Remove identity and first-boot state after systemd can no longer recreate it."""
@@ -905,11 +917,12 @@ class Builder:
             "mkdir-p /var/lib/cloud",
             "sync",
             "umount-all",
-        ])
+        ], description="removing machine identity and first-boot state")
 
     def root_uuid(self, *, image: Path | None = None, image_format: str = "raw") -> str:
         result = self.guestfish(
             ["run", "vfs-uuid /dev/sda2"], image=image, image_format=image_format,
+            description="reading the completed root filesystem UUID",
             read_only=True, capture=True,
         )
         root_uuid = result.stdout.strip()
@@ -977,7 +990,8 @@ class Builder:
             "run", "modprobe vfat", "mount /dev/sda2 /", "mount /dev/sda1 /boot/efi",
             f"tar-in {guestfish_quote(payload)} / compress:gzip xattrs:true acls:true",
             "sync", "umount-all",
-        ], image=overlay, image_format="qcow2")
+        ], description="installing the smoke-test payload into a disposable overlay",
+            image=overlay, image_format="qcow2")
 
     def create_nocloud_seed(self) -> Path:
         assert self.work
@@ -1014,7 +1028,8 @@ class Builder:
         self.guestfish([
             "run", "modprobe vfat", "mkfs vfat /dev/sda label:CIDATA", "mount /dev/sda /",
             f"tar-in {guestfish_quote(seed_tar)} /", "sync", "umount-all",
-        ], image=seed, image_format="raw")
+        ], description="creating the cloud-init NoCloud seed filesystem",
+            image=seed, image_format="raw")
         return seed
 
     def run_uefi_smoke_test(self, root_uuid: str, *, image: Path | None = None,
@@ -1112,9 +1127,9 @@ class Builder:
         payload = self.create_build_payload(root_uuid, esp_uuid)
         self.install_build_payload(payload)
         self.run_build_vm()
+        self.verify_build_marker()
         if self.build_mode == "factory":
             self.sanitize_factory_image()
-        self.validate_built_image()
         self.remove_build_marker()
         self.write_state(root_uuid=root_uuid, smoke_passed=False)
         complete = colorize("BUILD STAGE COMPLETE:", ANSI_GREEN)
@@ -1138,9 +1153,7 @@ class Builder:
             root_uuid = self.root_uuid(image=image, image_format="qcow2")
             if state.get("root_uuid") != root_uuid:
                 raise RuntimeError("root filesystem UUID does not match workspace state")
-            self.validate_built_image(
-                require_marker=False, image=image, image_format="qcow2"
-            )
+            self.validate_built_image(image=image, image_format="qcow2")
             self.run_uefi_smoke_test(root_uuid, image=image, image_format="qcow2")
             self.record_smoke_success(state)
             complete = colorize("SMOKE STAGE COMPLETE:", ANSI_GREEN)
@@ -1155,7 +1168,7 @@ class Builder:
             assert self.raw
             if not self.raw.is_file():
                 raise RuntimeError(f"workspace raw disk is missing: {self.raw}")
-            self.require_matching_state(require_smoke=False)
+            self.require_matching_state()
             self.confirm_output()
             self.convert()
             return
@@ -1175,9 +1188,7 @@ class Builder:
         self.convert()
         state = self.load_state()
         assert state is not None
-        self.validate_built_image(
-            require_marker=False, image=self.output, image_format="qcow2"
-        )
+        self.validate_built_image(image=self.output, image_format="qcow2")
         self.run_uefi_smoke_test(root_uuid, image=self.output, image_format="qcow2")
         self.record_smoke_success(state)
 
