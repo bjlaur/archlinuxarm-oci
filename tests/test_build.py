@@ -362,7 +362,7 @@ class RepositoryTests(unittest.TestCase):
 
     def test_arm_ubuntu_installs_kernel_for_supermin(self):
         dependencies = (build.PROJECT / "install-deps.sh").read_text()
-        self.assertIn('aarch64|arm64) packages+=(linux-image-arm64)', dependencies)
+        self.assertIn('aarch64|arm64) packages+=(linux-image-generic)', dependencies)
 
     def test_factory_smoke_waits_for_cloud_init_with_extended_timeout(self):
         with tempfile.TemporaryDirectory() as directory:

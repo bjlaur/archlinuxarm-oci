@@ -27,7 +27,7 @@ elif command -v apt-get >/dev/null 2>&1; then
     # Minimal ARM64 environments (including GitHub's hosted ARM runner) may run
     # an Azure kernel without providing a kernel image package for supermin.
     case "$(uname -m)" in
-        aarch64|arm64) packages+=(linux-image-arm64) ;;
+        aarch64|arm64) packages+=(linux-image-generic) ;;
     esac
     missing=()
     for pkg in "${packages[@]}"; do

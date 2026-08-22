@@ -26,7 +26,7 @@ sudo apt-get install python3 qemu-utils qemu-system-arm qemu-efi-aarch64 libgues
 ```
 
 On native ARM64 Ubuntu hosts, `install-deps.sh` also installs
-`linux-image-arm64`. Supermin needs an installed kernel image to construct the
+`linux-image-generic`. Supermin needs an installed kernel image to construct the
 libguestfs appliance; minimal and hosted ARM environments may not otherwise
 provide one.
 
