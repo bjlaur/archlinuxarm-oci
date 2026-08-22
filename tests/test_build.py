@@ -149,22 +149,60 @@ class ValidationTests(unittest.TestCase):
 
 
 class ArchiveTests(unittest.TestCase):
+    def test_guestfish_progress_for_visible_operations_only(self):
+        builder = build.Builder(build.parse_args([]))
+        builder.raw = Path("/tmp/test-image.raw")
+        completed = build.subprocess.CompletedProcess(["guestfish"], 0, stdout="", stderr="")
+        with mock.patch.object(build, "run", return_value=completed) as invoked:
+            builder.guestfish(["run"])
+            self.assertIn("--progress-bars", invoked.call_args.args[0])
+            builder.guestfish(["run"], capture=True)
+            self.assertNotIn("--progress-bars", invoked.call_args.args[0])
+
     def test_factory_build_skips_credentials(self):
         builder = build.Builder(build.parse_args(["--factory-image"]))
+        events: list[str] = []
+        state = {"version": 2, "build_mode": "factory", "image_user": "alarm"}
         with (
             mock.patch.object(builder, "check_environment"),
             mock.patch.object(builder, "confirm_output"),
             mock.patch.object(builder, "start_workspace"),
             mock.patch.object(builder, "run_build_stage", return_value=("root-uuid", "esp-uuid")),
-            mock.patch.object(builder, "run_uefi_smoke_test"),
-            mock.patch.object(builder, "write_state"),
-            mock.patch.object(builder, "convert"),
+            mock.patch.object(builder, "convert", side_effect=lambda: events.append("convert")),
+            mock.patch.object(builder, "load_state", return_value=state),
+            mock.patch.object(builder, "validate_built_image"),
+            mock.patch.object(
+                builder, "run_uefi_smoke_test", side_effect=lambda *_args, **_kwargs: events.append("smoke")
+            ),
+            mock.patch.object(builder, "record_smoke_success"),
             mock.patch.object(builder, "collect_passwords") as collect,
         ):
             builder.build()
         self.assertEqual(builder.build_mode, "factory")
         self.assertEqual(builder.admin_user, "alarm")
+        self.assertEqual(events, ["convert", "smoke"])
         collect.assert_not_called()
+
+    def test_development_build_converts_before_smoke(self):
+        builder = build.Builder(build.parse_args(["--username", "tester", "--password", "test-only"]))
+        events: list[str] = []
+        state = {"version": 2, "build_mode": "development", "image_user": "tester"}
+        with (
+            mock.patch.object(builder, "check_environment"),
+            mock.patch.object(builder, "confirm_output"),
+            mock.patch.object(builder, "collect_passwords"),
+            mock.patch.object(builder, "start_workspace"),
+            mock.patch.object(builder, "run_build_stage", return_value=("root-uuid", "esp-uuid")),
+            mock.patch.object(builder, "convert", side_effect=lambda: events.append("convert")),
+            mock.patch.object(builder, "load_state", return_value=state),
+            mock.patch.object(builder, "validate_built_image"),
+            mock.patch.object(
+                builder, "run_uefi_smoke_test", side_effect=lambda *_args, **_kwargs: events.append("smoke")
+            ),
+            mock.patch.object(builder, "record_smoke_success"),
+        ):
+            builder.build()
+        self.assertEqual(events, ["convert", "smoke"])
 
     def test_factory_and_development_ssh_templates(self):
         development = (build.PROJECT / "templates/sshd-security-development.conf").read_text()
@@ -178,11 +216,17 @@ class ArchiveTests(unittest.TestCase):
     def test_conversion_uses_zstd_compression(self):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
-            args = build.parse_args(["--output", str(base / "output.qcow2")])
+            args = build.parse_args([
+                "--work-dir", str(base), "--convert-only", "--output", str(base / "output.qcow2")
+            ])
             builder = build.Builder(args)
-            builder.raw = base / "source.raw"
+            builder.start_workspace(resume=True)
+            builder.admin_user = "tester"
+            assert builder.raw is not None
             builder.raw.write_bytes(b"raw-image")
-            with mock.patch.object(build, "run") as mocked_run:
+            builder.write_state(root_uuid="root-uuid", smoke_passed=False)
+            completed = build.subprocess.CompletedProcess(["qemu-img"], 0, stdout="", stderr="")
+            with mock.patch.object(build, "run", return_value=completed) as mocked_run:
                 builder.convert()
 
             convert = next(
@@ -190,6 +234,11 @@ class ArchiveTests(unittest.TestCase):
                 if call.args[0][:2] == ["qemu-img", "convert"]
             )
             self.assertIn("compression_type=zstd", convert)
+            state = builder.load_state()
+            assert state is not None
+            self.assertEqual(state["stage"], "converted")
+            self.assertFalse(state["smoke_passed"])
+            self.assertEqual(state["converted_image"]["format"], "qcow2")
 
     def test_exact_work_directory_is_retained(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -203,7 +252,7 @@ class ArchiveTests(unittest.TestCase):
             builder.cleanup()
             self.assertTrue(workspace.is_dir())
 
-    def test_conversion_requires_matching_smoke_success_state(self):
+    def test_workspace_state_tracks_smoke_and_raw_identity(self):
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)
             args = build.parse_args(["--work-dir", str(workspace), "--convert-only"])
@@ -222,6 +271,70 @@ class ArchiveTests(unittest.TestCase):
             builder.raw.write_bytes(b"changed-image")
             with self.assertRaisesRegex(RuntimeError, "raw disk changed"):
                 builder.require_matching_state(require_smoke=True)
+
+    def test_converted_image_is_portable_with_workspace_and_checksum(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            image = workspace / "factory.qcow2"
+            image.write_bytes(b"converted-image")
+            builder = build.Builder(build.parse_args(["--work-dir", str(workspace), "--smoke-test-only"]))
+            builder.start_workspace(resume=True)
+            builder.admin_user = "alarm"
+            assert builder.state_file is not None
+            builder.update_state({
+                "version": 2,
+                "stage": "converted",
+                "build_mode": "factory",
+                "image_user": "alarm",
+                "root_uuid": "root-uuid",
+                "raw": {"size": 1, "mtime_ns": 1},
+                "smoke_passed": False,
+                "build_accel": "tcg",
+                "smoke_accel": None,
+                "converted_image": {
+                    "filename": image.name,
+                    "format": "qcow2",
+                    "local_path": "/runner/path/that/no-longer-exists.qcow2",
+                    "size": image.stat().st_size,
+                    "sha256": builder.image_sha256(image),
+                },
+            })
+            info = build.subprocess.CompletedProcess(
+                ["qemu-img"], 0, stdout='{"format": "qcow2"}', stderr=""
+            )
+            with mock.patch.object(build, "run", return_value=info):
+                self.assertEqual(builder.resolve_converted_image(builder.load_state()), image)
+            image.write_bytes(b"altered")
+            with self.assertRaisesRegex(RuntimeError, "size does not match|checksum does not match"):
+                builder.resolve_converted_image(builder.load_state())
+
+    def test_smoke_overlay_uses_converted_qcow2_as_backing_image(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            image = workspace / "factory.qcow2"
+            image.write_bytes(b"qcow2")
+            code = workspace / "code.fd"
+            variables = workspace / "vars.fd"
+            code.write_bytes(b"code")
+            variables.write_bytes(b"vars")
+            builder = build.Builder(build.parse_args(["--factory-image"]))
+            builder.work = workspace
+            builder.admin_user = "alarm"
+            completed = build.subprocess.CompletedProcess(["qemu-img"], 0, stdout="", stderr="")
+            with (
+                mock.patch.object(build, "run", return_value=completed) as invoked,
+                mock.patch.object(builder, "install_smoke_payload"),
+                mock.patch.object(builder, "create_nocloud_seed", return_value=None),
+                mock.patch.object(builder, "find_firmware", return_value=(code, variables)),
+                mock.patch.object(builder, "select_acceleration", return_value="tcg"),
+                mock.patch.object(build.ConsoleRunner, "run"),
+            ):
+                builder.run_uefi_smoke_test(
+                    "root-uuid", image=image, image_format="qcow2"
+                )
+            create = invoked.call_args_list[0].args[0]
+            self.assertEqual(create[create.index("-F") + 1], "qcow2")
+            self.assertEqual(create[create.index("-b") + 1], image)
 
     def test_state_v2_infers_factory_mode_and_rejects_v1(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -312,7 +425,7 @@ class ArchiveTests(unittest.TestCase):
         }
         with (
             mock.patch.object(builder, "read_guest_file", side_effect=lambda path, **_kwargs: files[path]),
-            mock.patch.object(builder, "guest_path_exists", side_effect=lambda path: path in required),
+            mock.patch.object(builder, "guest_path_exists", side_effect=lambda path, **_kwargs: path in required),
             mock.patch.object(builder, "guest_glob", return_value=[]),
             mock.patch.object(builder, "guest_file_size", return_value=0),
         ):
@@ -321,7 +434,7 @@ class ArchiveTests(unittest.TestCase):
         files["/etc/shadow"] = "root:$6$usable:1::::::\nalarm:!:1::::::\n"
         with (
             mock.patch.object(builder, "read_guest_file", side_effect=lambda path, **_kwargs: files[path]),
-            mock.patch.object(builder, "guest_path_exists", side_effect=lambda path: path in required),
+            mock.patch.object(builder, "guest_path_exists", side_effect=lambda path, **_kwargs: path in required),
             mock.patch.object(builder, "guest_glob", return_value=[]),
             mock.patch.object(builder, "guest_file_size", return_value=0),
             self.assertRaisesRegex(RuntimeError, "passwords must be locked"),
@@ -365,6 +478,19 @@ class RepositoryTests(unittest.TestCase):
         self.assertIn("--work-dir /tmp/archlinuxarm-oci-work", workflow)
         self.assertNotIn('$RUNNER_TEMP/archlinuxarm-oci-work', workflow)
         self.assertIn("findmnt -T /tmp", workflow)
+        self.assertIn("name: factory-image-${{ github.run_id }}", workflow)
+        self.assertIn("name: factory-smoke-results-${{ github.run_id }}", workflow)
+        self.assertIn("needs: [decide, build]", workflow)
+        self.assertIn("needs: [decide, build, smoke]", workflow)
+        self.assertIn("Smoke-test downloaded QCOW2 artifact", workflow)
+        self.assertLess(
+            workflow.index("Upload converted image for smoke testing"),
+            workflow.index("Smoke-test downloaded QCOW2 artifact"),
+        )
+        self.assertLess(
+            workflow.index("Smoke-test downloaded QCOW2 artifact"),
+            workflow.index("Publish GitHub Release"),
+        )
 
     def test_host_dependency_installer_does_not_add_a_second_kernel(self):
         dependencies = (build.PROJECT / "install-deps.sh").read_text()

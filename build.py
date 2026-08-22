@@ -34,6 +34,7 @@ SMOKE_SUCCESS = b"OCI_IMAGE_UEFI_SMOKE_SUCCESS"
 REQUIRED_COMMANDS = ("curl", "gpg", "guestfish", "qemu-img", "qemu-system-aarch64")
 FACTORY_USER = "alarm"
 BUILD_MODES = ("development", "factory")
+DEFAULT_OUTPUT_NAME = "archlinuxarm-oci.qcow2"
 SMOKE_PUBLIC_KEY = (
     "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEYdU6aY7SBVn3fnVPoknHLghaHffieYYPuJ0a1PUKiT "
     "archlinuxarm-oci-smoke"
@@ -261,7 +262,13 @@ class Builder:
         self.initramfs: Path | None = None
         self.state_file: Path | None = None
         self.explicit_work = False
-        self.output = Path(args.output).resolve()
+        if args.output:
+            output = Path(args.output)
+        elif args.work_dir:
+            output = Path(args.work_dir).expanduser() / DEFAULT_OUTPUT_NAME
+        else:
+            output = Path(DEFAULT_OUTPUT_NAME)
+        self.output = output.resolve()
         self.admin_user: str | None = None
         self.passwords: tuple[str, str] | None = None
         self.build_mode = "factory" if args.factory_image else "development"
@@ -396,6 +403,7 @@ class Builder:
         assert self.state_file and self.admin_user
         state = {
             "version": 2,
+            "stage": "smoke-passed" if smoke_passed else "built",
             "build_mode": self.build_mode,
             "image_user": self.admin_user,
             "root_uuid": root_uuid,
@@ -407,6 +415,84 @@ class Builder:
         temporary = self.state_file.with_suffix(".json.tmp")
         temporary.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n")
         os.replace(temporary, self.state_file)
+
+    def update_state(self, state: dict[str, object]) -> None:
+        assert self.state_file
+        temporary = self.state_file.with_suffix(".json.tmp")
+        temporary.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n")
+        os.replace(temporary, self.state_file)
+
+    @staticmethod
+    def image_sha256(image: Path) -> str:
+        digest = hashlib.sha256()
+        with image.open("rb") as source:
+            for chunk in iter(lambda: source.read(8 * 1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    def record_conversion(self, digest: str) -> None:
+        state = self.require_matching_state(require_smoke=False)
+        state.update({
+            "stage": "converted",
+            "smoke_passed": False,
+            "smoke_accel": None,
+            "converted_image": {
+                "filename": self.output.name,
+                "format": "qcow2",
+                "local_path": str(self.output),
+                "size": self.output.stat().st_size,
+                "sha256": digest,
+            },
+        })
+        self.update_state(state)
+
+    def resolve_converted_image(self, state: dict[str, object]) -> Path:
+        assert self.work
+        converted = state.get("converted_image")
+        if not isinstance(converted, dict):
+            raise RuntimeError("workspace has no converted QCOW2; run --convert-only first")
+        filename = converted.get("filename")
+        size = converted.get("size")
+        expected_digest = converted.get("sha256")
+        if (
+            not isinstance(filename, str)
+            or not filename
+            or Path(filename).name != filename
+            or converted.get("format") != "qcow2"
+            or not isinstance(size, int)
+            or size < 1
+            or not isinstance(expected_digest, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", expected_digest)
+        ):
+            raise RuntimeError("workspace contains invalid converted-image metadata")
+        candidates = [self.work / filename]
+        local_path = converted.get("local_path")
+        if isinstance(local_path, str):
+            candidates.append(Path(local_path))
+        image = next((candidate for candidate in candidates if candidate.is_file()), None)
+        if image is None:
+            raise RuntimeError(f"converted QCOW2 is missing from workspace: {filename}")
+        if image.stat().st_size != size:
+            raise RuntimeError(f"converted QCOW2 size does not match build state: {image}")
+        if self.image_sha256(image) != expected_digest:
+            raise RuntimeError(f"converted QCOW2 checksum does not match build state: {image}")
+        info = run(["qemu-img", "info", "--output=json", "-f", "qcow2", image], capture=True)
+        try:
+            image_info = json.loads(info.stdout)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"could not parse QCOW2 metadata: {image}") from exc
+        if image_info.get("format") != "qcow2":
+            raise RuntimeError(f"converted image is not QCOW2: {image}")
+        run(["qemu-img", "check", "-f", "qcow2", image])
+        return image
+
+    def record_smoke_success(self, state: dict[str, object]) -> None:
+        state.update({
+            "stage": "smoke-passed",
+            "smoke_passed": True,
+            "smoke_accel": self.smoke_accel,
+        })
+        self.update_state(state)
 
     def adopt_state(self, state: dict[str, object]) -> None:
         mode = state["build_mode"]
@@ -498,8 +584,12 @@ class Builder:
             cache = self.work / "guestfs-cache"
             cache.mkdir(exist_ok=True)
             env["LIBGUESTFS_CACHEDIR"] = str(cache)
+        arguments: list[object] = ["guestfish", mode]
+        if not capture:
+            arguments.append("--progress-bars")
+        arguments.extend([f"--format={image_format}", "-a", target])
         return run(
-            ["guestfish", mode, f"--format={image_format}", "-a", target],
+            arguments,
             capture=capture,
             input_text=script,
             env=env,
@@ -671,43 +761,49 @@ class Builder:
         )
         return result.stdout
 
-    def guest_path_exists(self, path: str) -> bool:
+    def guest_path_exists(self, path: str, *, image: Path | None = None,
+                          image_format: str = "raw") -> bool:
         result = self.guestfish(
             ["run", "mount-ro /dev/sda2 /", f"exists {path}"],
-            read_only=True, capture=True,
+            image=image, image_format=image_format, read_only=True, capture=True,
         )
         values = [line.strip() for line in result.stdout.splitlines() if line.strip() in {"true", "false"}]
         if not values:
             raise RuntimeError(f"could not inspect guest path: {path}")
         return values[-1] == "true"
 
-    def guest_glob(self, pattern: str) -> list[str]:
+    def guest_glob(self, pattern: str, *, image: Path | None = None,
+                   image_format: str = "raw") -> list[str]:
         result = self.guestfish(
             ["run", "mount-ro /dev/sda2 /", f"glob echo {pattern}"],
-            read_only=True, capture=True,
+            image=image, image_format=image_format, read_only=True, capture=True,
         )
         return [
             value for line in result.stdout.splitlines()
             if (value := line.strip()).startswith("/") and value != pattern
         ]
 
-    def guest_file_size(self, path: str) -> int:
+    def guest_file_size(self, path: str, *, image: Path | None = None,
+                        image_format: str = "raw") -> int:
         result = self.guestfish(
             ["run", "mount-ro /dev/sda2 /", f"filesize {guestfish_quote(path)}"],
-            read_only=True, capture=True,
+            image=image, image_format=image_format, read_only=True, capture=True,
         )
         values = [line.strip() for line in result.stdout.splitlines() if line.strip()]
         if not values or not values[-1].isdigit():
             raise RuntimeError(f"could not inspect guest file size: {path}")
         return int(values[-1])
 
-    def validate_built_image(self, *, require_marker: bool = True) -> None:
+    def validate_built_image(self, *, require_marker: bool = True,
+                             image: Path | None = None, image_format: str = "raw") -> None:
         assert self.admin_user
         if require_marker:
-            marker = self.read_guest_file("/var/lib/archlinuxarm-oci/build-success").strip()
+            marker = self.read_guest_file(
+                "/var/lib/archlinuxarm-oci/build-success", image=image, image_format=image_format
+            ).strip()
             if marker != BUILD_SUCCESS.decode():
                 raise RuntimeError(f"missing durable build marker: {marker!r}")
-        passwd = self.read_guest_file("/etc/passwd")
+        passwd = self.read_guest_file("/etc/passwd", image=image, image_format=image_format)
         interactive: list[str] = []
         for line in passwd.splitlines():
             fields = line.split(":")
@@ -718,7 +814,10 @@ class Builder:
                 interactive.append(fields[0])
         if sorted(interactive) != sorted(["root", self.admin_user]):
             raise RuntimeError(f"unexpected interactive users in completed image: {interactive}")
-        ssh = self.read_guest_file("/etc/ssh/sshd_config.d/10-oci-security.conf")
+        ssh = self.read_guest_file(
+            "/etc/ssh/sshd_config.d/10-oci-security.conf", image=image,
+            image_format=image_format,
+        )
         if self.build_mode == "factory":
             if self.admin_user != FACTORY_USER or re.search(r"^arch:", passwd, re.MULTILINE):
                 raise RuntimeError("factory image must preserve alarm and must not contain an arch account")
@@ -737,7 +836,7 @@ class Builder:
             if line not in ssh:
                 raise RuntimeError(f"completed image is missing SSH policy: {line}")
         if self.build_mode == "factory":
-            shadow = self.read_guest_file("/etc/shadow")
+            shadow = self.read_guest_file("/etc/shadow", image=image, image_format=image_format)
             hashes = {
                 fields[0]: fields[1]
                 for line in shadow.splitlines()
@@ -747,10 +846,15 @@ class Builder:
                 not value.startswith(("!", "*")) for value in hashes.values()
             ):
                 raise RuntimeError("factory root and alarm passwords must be locked")
-            cloud_cfg = self.read_guest_file("/etc/cloud/cloud.cfg.d/90-oci-alarm.cfg")
+            cloud_cfg = self.read_guest_file(
+                "/etc/cloud/cloud.cfg.d/90-oci-alarm.cfg", image=image,
+                image_format=image_format,
+            )
             if "name: alarm" not in cloud_cfg or "lock_passwd: true" not in cloud_cfg:
                 raise RuntimeError("factory image is missing the alarm cloud-init override")
-            sudoers = self.read_guest_file("/etc/sudoers.d/20-alarm-cloud")
+            sudoers = self.read_guest_file(
+                "/etc/sudoers.d/20-alarm-cloud", image=image, image_format=image_format
+            )
             if "alarm ALL=(ALL:ALL) NOPASSWD: ALL" not in sudoers:
                 raise RuntimeError("factory image is missing passwordless alarm sudo")
             required_paths = (
@@ -762,7 +866,7 @@ class Builder:
                 "/usr/lib/systemd/system/cloud-final.service",
             )
             for path in required_paths:
-                if not self.guest_path_exists(path):
+                if not self.guest_path_exists(path, image=image, image_format=image_format):
                     raise RuntimeError(f"factory image is missing cloud-init component: {path}")
             forbidden_paths = (
                 "/root/.ssh/authorized_keys", "/root/.ssh/authorized_keys2",
@@ -770,11 +874,17 @@ class Builder:
                 "/var/lib/systemd/random-seed", "/var/lib/cloud/instance",
             )
             for path in forbidden_paths:
-                if self.guest_path_exists(path):
+                if self.guest_path_exists(path, image=image, image_format=image_format):
                     raise RuntimeError(f"factory image contains forbidden first-boot state: {path}")
-            if self.guest_file_size("/etc/machine-id") != 0:
+            if self.guest_file_size(
+                "/etc/machine-id", image=image, image_format=image_format
+            ) != 0:
                 raise RuntimeError("factory machine-id is not empty")
-            if self.guest_glob("/etc/ssh/ssh_host_*") or self.guest_glob("/var/lib/cloud/instances/*"):
+            if self.guest_glob(
+                "/etc/ssh/ssh_host_*", image=image, image_format=image_format
+            ) or self.guest_glob(
+                "/var/lib/cloud/instances/*", image=image, image_format=image_format
+            ):
                 raise RuntimeError("factory image contains generated SSH or cloud-init state")
 
     def remove_build_marker(self) -> None:
@@ -798,8 +908,11 @@ class Builder:
             "umount-all",
         ])
 
-    def root_uuid(self) -> str:
-        result = self.guestfish(["run", "vfs-uuid /dev/sda2"], read_only=True, capture=True)
+    def root_uuid(self, *, image: Path | None = None, image_format: str = "raw") -> str:
+        result = self.guestfish(
+            ["run", "vfs-uuid /dev/sda2"], image=image, image_format=image_format,
+            read_only=True, capture=True,
+        )
         root_uuid = result.stdout.strip()
         if not root_uuid:
             raise RuntimeError("could not read the root filesystem UUID")
@@ -905,8 +1018,11 @@ class Builder:
         ], image=seed, image_format="raw")
         return seed
 
-    def run_uefi_smoke_test(self, root_uuid: str) -> None:
-        assert self.work and self.raw
+    def run_uefi_smoke_test(self, root_uuid: str, *, image: Path | None = None,
+                            image_format: str = "raw") -> None:
+        assert self.work
+        source = image or self.raw
+        assert source
         print_stage("Boot-testing the completed image through AArch64 UEFI")
         overlay = self.work / "uefi-smoke.qcow2"
         for disposable in (
@@ -917,7 +1033,10 @@ class Builder:
         ):
             if disposable.exists():
                 disposable.unlink()
-        run(["qemu-img", "create", "-f", "qcow2", "-F", "raw", "-b", self.raw, overlay])
+        run([
+            "qemu-img", "create", "-f", "qcow2", "-F", image_format,
+            "-b", source, overlay,
+        ])
         self.install_smoke_payload(overlay, root_uuid)
         seed = self.create_nocloud_seed() if self.build_mode == "factory" else None
         code, variables = self.find_firmware()
@@ -946,7 +1065,7 @@ class Builder:
             timeout=self.args.smoke_timeout,
         )
 
-    def convert(self) -> None:
+    def convert(self) -> str:
         assert self.raw
         print_stage("Converting verified raw disk to compressed QCOW2")
         self.output.parent.mkdir(parents=True, exist_ok=True)
@@ -962,13 +1081,12 @@ class Builder:
         run(["qemu-img", "check", "-f", "qcow2", temporary])
         os.replace(temporary, self.output)
         run(["qemu-img", "info", "-f", "qcow2", self.output])
-        digest = hashlib.sha256()
-        with self.output.open("rb") as source:
-            for chunk in iter(lambda: source.read(8 * 1024 * 1024), b""):
-                digest.update(chunk)
+        digest = self.image_sha256(self.output)
+        self.record_conversion(digest)
         done = colorize("DONE:", ANSI_GREEN)
         sha256 = colorize("SHA256:", ANSI_GREEN)
-        print(f"\n{done} {self.output}\n{sha256} {digest.hexdigest()}")
+        print(f"\n{done} {self.output}\n{sha256} {digest}")
+        return digest
 
     def collect_passwords(self) -> None:
         if self.args.password is not None:
@@ -1013,18 +1131,21 @@ class Builder:
             if self.args.password is not None:
                 raise SystemExit("--password is only valid when running the build stage")
             self.start_workspace(resume=True)
-            assert self.raw
-            if not self.raw.is_file():
-                raise RuntimeError(f"workspace raw disk is missing: {self.raw}")
-            state = self.require_matching_state(require_smoke=False)
-            root_uuid = self.root_uuid()
+            state = self.load_state()
+            if state is None:
+                raise RuntimeError(f"workspace has no build-state.json: {self.work}")
+            self.adopt_state(state)
+            image = self.resolve_converted_image(state)
+            root_uuid = self.root_uuid(image=image, image_format="qcow2")
             if state.get("root_uuid") != root_uuid:
                 raise RuntimeError("root filesystem UUID does not match workspace state")
-            self.validate_built_image(require_marker=False)
-            self.run_uefi_smoke_test(root_uuid)
-            self.write_state(root_uuid=root_uuid, smoke_passed=True)
+            self.validate_built_image(
+                require_marker=False, image=image, image_format="qcow2"
+            )
+            self.run_uefi_smoke_test(root_uuid, image=image, image_format="qcow2")
+            self.record_smoke_success(state)
             complete = colorize("SMOKE STAGE COMPLETE:", ANSI_GREEN)
-            print(f"\n{complete} {self.raw}\nWorkspace: {self.work}")
+            print(f"\n{complete} {image}\nWorkspace: {self.work}")
             return
 
         if self.args.convert_only:
@@ -1035,7 +1156,7 @@ class Builder:
             assert self.raw
             if not self.raw.is_file():
                 raise RuntimeError(f"workspace raw disk is missing: {self.raw}")
-            self.require_matching_state(require_smoke=True)
+            self.require_matching_state(require_smoke=False)
             self.confirm_output()
             self.convert()
             return
@@ -1052,9 +1173,14 @@ class Builder:
         root_uuid, _ = self.run_build_stage()
         if self.args.build_only:
             return
-        self.run_uefi_smoke_test(root_uuid)
-        self.write_state(root_uuid=root_uuid, smoke_passed=True)
         self.convert()
+        state = self.load_state()
+        assert state is not None
+        self.validate_built_image(
+            require_marker=False, image=self.output, image_format="qcow2"
+        )
+        self.run_uefi_smoke_test(root_uuid, image=self.output, image_format="qcow2")
+        self.record_smoke_success(state)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -1064,7 +1190,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--username", help="admin username (prompted when omitted)")
     parser.add_argument("--password", help="UNSAFE TEST-ONLY password for both interactive accounts")
     parser.add_argument("--factory-image", action="store_true", help="build a credential-free cloud-init factory image")
-    parser.add_argument("--output", default="archlinuxarm-oci.qcow2", help="output QCOW2 path")
+    parser.add_argument(
+        "--output",
+        help="output QCOW2 path (default: work directory for staged builds, current directory otherwise)",
+    )
     parser.add_argument("--rootfs-url", default=DEFAULT_ROOTFS_URL, help="official ALARM rootfs URL")
     parser.add_argument("--keyserver", default="hkps://keyserver.ubuntu.com", help="OpenPGP keyserver")
     parser.add_argument("--memory", type=int, default=4096, help="build VM RAM in MiB (default: 4096)")
@@ -1081,8 +1210,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--check", action="store_true", help="check rootless dependencies and exit")
     stages = parser.add_mutually_exclusive_group()
     stages.add_argument("--build-only", action="store_true", help="build and validate the raw disk, then stop")
-    stages.add_argument("--smoke-test-only", action="store_true", help="UEFI smoke-test an existing workspace")
-    stages.add_argument("--convert-only", action="store_true", help="convert a smoke-tested workspace raw disk to QCOW2")
+    stages.add_argument(
+        "--smoke-test-only", action="store_true",
+        help="UEFI smoke-test the converted QCOW2 recorded by an existing workspace",
+    )
+    stages.add_argument(
+        "--convert-only", action="store_true",
+        help="convert a validated workspace raw disk to QCOW2 before smoke testing",
+    )
     args = parser.parse_args(argv)
     if args.factory_image and (args.username is not None or args.password is not None):
         parser.error("--factory-image cannot be combined with --username or --password")

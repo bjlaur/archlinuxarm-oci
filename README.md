@@ -82,18 +82,24 @@ Every published image must pass:
    fingerprint;
 2. a rootless AArch64 configuration boot;
 3. offline account, SSH, cloud-init, identity, and bootloader validation;
-4. a real AArch64 UEFI boot with disposable NoCloud metadata proving SSH-key
-   provisioning and passwordless administration; and
-5. zstd QCOW2 conversion followed by `qemu-img check` and SHA-256 generation.
+4. zstd QCOW2 conversion followed by `qemu-img check` and SHA-256 generation;
+   and
+5. a real AArch64 UEFI boot of that exact QCOW2 artifact, through a disposable
+   overlay and with NoCloud metadata proving SSH-key provisioning and
+   passwordless administration.
 
-Failed builds do not replace the latest release.
+The converted QCOW2 and `build-state.json` are uploaded before the smoke job.
+If smoke testing fails, that exact artifact remains available for reproduction;
+failed builds do not replace the latest release.
 
 ## Development images
 
 The builder also retains a development mode for manual testing. Development
 images ask for a custom administrator and separate root/administrator
 passwords. They enable password SSH only for that administrator and require its
-password for sudo. Development images are never published as releases.
+password for sudo. Development builds also convert before smoke testing, so the
+exact failed QCOW2 is retained for local diagnosis. Development images are
+never published as releases.
 
 ## Building from source
 
@@ -133,14 +139,20 @@ listings and must never be used for a real image:
 ### Staged and resumable builds
 
 An explicit workspace is retained and must be empty for the build stage. Later
-stages infer factory or development mode from its versioned state:
+stages infer factory or development mode and the converted image name from its
+versioned `build-state.json`. Both modes convert before boot-testing the exact
+QCOW2:
 
 ```bash
 ./build.py --factory-image --work-dir /path/to/work --build-only
+./build.py --work-dir /path/to/work --convert-only
 ./build.py --work-dir /path/to/work --smoke-test-only
-./build.py --work-dir /path/to/work --convert-only \
-  --output /path/to/work/archlinuxarm-oci.qcow2
 ```
+
+When `--output` is omitted for a staged build, the QCOW2 is written inside the
+workspace. Conversion records its filename, size, format, and SHA-256 so a
+relocated workspace or downloaded CI artifact can be verified before smoke
+testing.
 
 Use a disk-backed workspace when `/tmp` is a RAM-backed tmpfs.
 
