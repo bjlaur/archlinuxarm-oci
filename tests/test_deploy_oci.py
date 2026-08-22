@@ -611,8 +611,31 @@ class ShapeAndLifecycleTests(unittest.TestCase):
         ):
             result = deploy.wait_for_resource(
                 lambda: next(resources), {"IMPORTING"}, "AVAILABLE", 30, "image"
+        )
+        self.assertEqual(result["id"], "image")
+
+    def test_waiter_reports_unchanged_state_periodically(self):
+        resources = iter(
+            [
+                {"lifecycle-state": "IMPORTING"},
+                {"lifecycle-state": "IMPORTING"},
+                {"lifecycle-state": "IMPORTING"},
+                {"lifecycle-state": "AVAILABLE", "id": "image"},
+            ]
+        )
+        times = iter([0, 0, 30, 65, 65, 90])
+        with (
+            mock.patch.object(deploy.time, "monotonic", side_effect=lambda: next(times)),
+            mock.patch.object(deploy.time, "sleep"),
+            mock.patch("sys.stdout", new_callable=io.StringIO) as output,
+        ):
+            result = deploy.wait_for_resource(
+                lambda: next(resources), {"IMPORTING"}, "AVAILABLE", 120, "image"
             )
         self.assertEqual(result["id"], "image")
+        self.assertIn("IMAGE  IMPORTING (0s)", output.getvalue())
+        self.assertIn("IMAGE  IMPORTING (65s)", output.getvalue())
+        self.assertIn("IMAGE  AVAILABLE (65s)", output.getvalue())
 
     def test_waiter_fails_closed_on_unknown_state(self):
         with self.assertRaisesRegex(deploy.DeploymentError, "FAILED"):

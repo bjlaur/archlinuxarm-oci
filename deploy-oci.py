@@ -958,18 +958,23 @@ def lifecycle_value(resource, description):
 def wait_for_resource(getter, active_states, success_state, timeout, description):
     started = time.monotonic()
     delay = 10
+    progress_interval = 60
     last_state = None
+    last_reported = started
     while True:
+        now = time.monotonic()
         resource = getter()
         state = lifecycle_value(resource, description)
-        if state != last_state:
-            print(f"{description.upper()}  {state} ({int(time.monotonic() - started)}s)")
+        elapsed = int(now - started)
+        if state != last_state or now - last_reported >= progress_interval:
+            print(f"{description.upper()}  {state} ({elapsed}s)")
             last_state = state
+            last_reported = now
         if state == success_state:
             return resource
         if state not in active_states:
             raise DeploymentError(f"{description} entered unexpected state {state}")
-        if time.monotonic() - started >= timeout:
+        if now - started >= timeout:
             raise DeploymentError(f"timed out waiting for {description} to reach {success_state}")
         time.sleep(delay)
         delay = min(30, delay + 5)
