@@ -141,7 +141,7 @@ jobs:
       - name: Run source checks
         run: |
           python3 -m unittest discover -s tests -v
-          python3 -m py_compile build.py
+          python3 -m py_compile build.py download-latest.py
           bash -n ci/*.sh guest/*.sh install-deps.sh
 
       - name: Install build dependencies

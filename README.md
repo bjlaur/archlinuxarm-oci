@@ -11,15 +11,31 @@ rootfs. It is not an official Arch Linux or Arch Linux ARM image.
 
 ## Download and verify
 
-Open the [latest release](https://github.com/bjlaur/archlinuxarm-oci/releases/latest)
+### Automated download
+
+Download and verify the latest image in the current directory:
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/bjlaur/archlinuxarm-oci/main/download-latest.py && python3 download-latest.py
+```
+
+The downloader requires `curl` and Python 3. Curl provides transfer progress
+and retry handling; Python validates the release metadata and keeps an image
+only after its SHA-256 matches both published checksum sources. The script
+refuses to overwrite existing downloads. Pass a directory as its only argument
+to save the assets somewhere else.
+
+### Manual download
+
+Open the
+[latest release](https://github.com/bjlaur/archlinuxarm-oci/releases/latest)
 in your browser and download these three assets:
 
 - the `.qcow2` image;
 - its matching `.qcow2.sha256` checksum file; and
 - `build-info.json`.
 
-In a terminal, change to the directory containing the downloads and verify the
-image:
+Then change to the directory containing the downloads and verify the image:
 
 ```bash
 sha256sum -c -- *.qcow2.sha256
@@ -189,7 +205,7 @@ explicit `--accel tcg` also forces its appliance to use TCG.
 
 ```bash
 python3 -m unittest discover -s tests -v
-python3 -m py_compile build.py
+python3 -m py_compile build.py download-latest.py
 bash -n ci/*.sh guest/*.sh install-deps.sh
 ./build.py --check
 ```
