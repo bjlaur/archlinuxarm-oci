@@ -18,6 +18,47 @@ class TerminalBuffer(io.StringIO):
         return True
 
 
+def factory_inspection(*, shadow: str = "root:!:1::::::\nalarm:!:1::::::\n"):
+    required = {
+        "/usr/bin/cloud-init",
+        "/usr/lib/systemd/system-generators/cloud-init-generator",
+        "/usr/lib/systemd/system/cloud-init.target",
+        "/usr/lib/systemd/system/cloud-init-local.service",
+        "/usr/lib/systemd/system/cloud-init-main.service",
+        "/usr/lib/systemd/system/cloud-final.service",
+    }
+    all_paths = required | {
+        "/root/.ssh/authorized_keys",
+        "/root/.ssh/authorized_keys2",
+        "/home/alarm/.ssh/authorized_keys",
+        "/home/alarm/.ssh/authorized_keys2",
+        "/var/lib/systemd/random-seed",
+        "/var/lib/cloud/instance",
+    }
+    return build.ImageInspection(
+        root_uuid="12345678-1234-1234-1234-123456789abc",
+        files={
+            "/etc/passwd": (
+                "root:x:0:0::/root:/usr/bin/bash\n"
+                "alarm:x:1000:1000::/home/alarm:/bin/bash\n"
+            ),
+            "/etc/shadow": shadow,
+            "/etc/ssh/sshd_config.d/10-oci-security.conf": (
+                build.PROJECT / "templates/sshd-security-factory.conf"
+            ).read_text(),
+            "/etc/cloud/cloud.cfg.d/90-oci-alarm.cfg": (
+                build.PROJECT / "templates/cloud-init-alarm.cfg"
+            ).read_text(),
+            "/etc/sudoers.d/20-alarm-cloud": (
+                build.PROJECT / "templates/sudoers-alarm"
+            ).read_text(),
+        },
+        paths={path: path in required for path in all_paths},
+        sizes={"/etc/machine-id": 0},
+        globs={"/etc/ssh/ssh_host_*": [], "/var/lib/cloud/instances/*": []},
+    )
+
+
 class ValidationTests(unittest.TestCase):
     def test_password_prompt_confirms_each_password(self):
         responses = iter(["first", "different", "root-secret", "root-secret"])
@@ -194,7 +235,10 @@ class ArchiveTests(unittest.TestCase):
     def test_factory_build_skips_credentials(self):
         builder = build.Builder(build.parse_args(["--factory-image"]))
         events: list[str] = []
-        state = {"version": 2, "build_mode": "factory", "image_user": "alarm"}
+        state = {
+            "version": 2, "build_mode": "factory", "image_user": "alarm",
+            "root_uuid": "root-uuid",
+        }
         with (
             mock.patch.object(builder, "check_environment"),
             mock.patch.object(builder, "confirm_output"),
@@ -202,6 +246,10 @@ class ArchiveTests(unittest.TestCase):
             mock.patch.object(builder, "run_build_stage", return_value=("root-uuid", "esp-uuid")),
             mock.patch.object(builder, "convert", side_effect=lambda: events.append("convert")),
             mock.patch.object(builder, "load_state", return_value=state),
+            mock.patch.object(
+                builder, "inspect_built_image",
+                return_value=build.ImageInspection("root-uuid", {}, {}, {}, {}),
+            ),
             mock.patch.object(builder, "validate_built_image"),
             mock.patch.object(
                 builder, "run_uefi_smoke_test", side_effect=lambda *_args, **_kwargs: events.append("smoke")
@@ -218,7 +266,10 @@ class ArchiveTests(unittest.TestCase):
     def test_development_build_converts_before_smoke(self):
         builder = build.Builder(build.parse_args(["--username", "tester", "--password", "test-only"]))
         events: list[str] = []
-        state = {"version": 2, "build_mode": "development", "image_user": "tester"}
+        state = {
+            "version": 2, "build_mode": "development", "image_user": "tester",
+            "root_uuid": "root-uuid",
+        }
         with (
             mock.patch.object(builder, "check_environment"),
             mock.patch.object(builder, "confirm_output"),
@@ -227,6 +278,10 @@ class ArchiveTests(unittest.TestCase):
             mock.patch.object(builder, "run_build_stage", return_value=("root-uuid", "esp-uuid")),
             mock.patch.object(builder, "convert", side_effect=lambda: events.append("convert")),
             mock.patch.object(builder, "load_state", return_value=state),
+            mock.patch.object(
+                builder, "inspect_built_image",
+                return_value=build.ImageInspection("root-uuid", {}, {}, {}, {}),
+            ),
             mock.patch.object(builder, "validate_built_image"),
             mock.patch.object(
                 builder, "run_uefi_smoke_test", side_effect=lambda *_args, **_kwargs: events.append("smoke")
@@ -425,83 +480,157 @@ class ArchiveTests(unittest.TestCase):
     def test_factory_validation_enforces_locked_keyless_cloud_image(self):
         builder = build.Builder(build.parse_args(["--factory-image"]))
         builder.admin_user = "alarm"
-        files = {
-            "/etc/passwd": (
-                "root:x:0:0::/root:/usr/bin/bash\n"
-                "alarm:x:1000:1000::/home/alarm:/bin/bash\n"
-            ),
-            "/etc/shadow": "root:!:1::::::\nalarm:!:1::::::\n",
-            "/etc/ssh/sshd_config.d/10-oci-security.conf": (
-                build.PROJECT / "templates/sshd-security-factory.conf"
-            ).read_text(),
-            "/etc/cloud/cloud.cfg.d/90-oci-alarm.cfg": (
-                build.PROJECT / "templates/cloud-init-alarm.cfg"
-            ).read_text(),
-            "/etc/sudoers.d/20-alarm-cloud": (
-                build.PROJECT / "templates/sudoers-alarm"
-            ).read_text(),
-            "/etc/machine-id": "",
-        }
-        required = {
-            "/usr/bin/cloud-init",
-            "/usr/lib/systemd/system-generators/cloud-init-generator",
-            "/usr/lib/systemd/system/cloud-init.target",
-            "/usr/lib/systemd/system/cloud-init-local.service",
-            "/usr/lib/systemd/system/cloud-init-main.service",
-            "/usr/lib/systemd/system/cloud-final.service",
-        }
-        with (
-            mock.patch.object(builder, "read_guest_file", side_effect=lambda path, **_kwargs: files[path]),
-            mock.patch.object(builder, "guest_path_exists", side_effect=lambda path, **_kwargs: path in required),
-            mock.patch.object(builder, "guest_glob", return_value=[]),
-            mock.patch.object(builder, "guest_file_size", return_value=0),
-        ):
-            builder.validate_built_image()
+        builder.validate_built_image(factory_inspection())
 
-        files["/etc/shadow"] = "root:$6$usable:1::::::\nalarm:!:1::::::\n"
+        unlocked = factory_inspection(
+            shadow="root:$6$usable:1::::::\nalarm:!:1::::::\n"
+        )
+        with self.assertRaisesRegex(RuntimeError, "passwords must be locked"):
+            builder.validate_built_image(unlocked)
+
+    def test_completed_image_inspection_uses_one_guestfish_session(self):
+        builder = build.Builder(build.parse_args(["--factory-image"]))
+        builder.admin_user = "alarm"
+        expected = factory_inspection()
+        values = [
+            expected.root_uuid,
+            expected.files["/etc/passwd"],
+            expected.files["/etc/ssh/sshd_config.d/10-oci-security.conf"],
+            expected.files["/etc/shadow"],
+            expected.files["/etc/cloud/cloud.cfg.d/90-oci-alarm.cfg"],
+            expected.files["/etc/sudoers.d/20-alarm-cloud"],
+            *(["true"] * 6),
+            *(["false"] * 6),
+            "0",
+            "/etc/ssh/ssh_host_*",
+            "/var/lib/cloud/instances/*",
+        ]
+        keys = [
+            "root_uuid", *[f"file.{index}" for index in range(5)],
+            *[f"path.{index}" for index in range(12)], "size.0", "glob.0", "glob.1",
+        ]
+        token = "OCIINSPECTdeadbeef"
+        stdout = "\n".join(
+            line
+            for key, value in zip(keys, values, strict=True)
+            for line in (f"{token}:BEGIN:{key}", value, f"{token}:END:{key}")
+        ) + "\n"
+        completed = build.subprocess.CompletedProcess(
+            ["guestfish"], 0, stdout=stdout, stderr=""
+        )
         with (
-            mock.patch.object(builder, "read_guest_file", side_effect=lambda path, **_kwargs: files[path]),
-            mock.patch.object(builder, "guest_path_exists", side_effect=lambda path, **_kwargs: path in required),
-            mock.patch.object(builder, "guest_glob", return_value=[]),
-            mock.patch.object(builder, "guest_file_size", return_value=0),
-            self.assertRaisesRegex(RuntimeError, "passwords must be locked"),
+            mock.patch.object(build.secrets, "token_hex", return_value="deadbeef"),
+            mock.patch.object(builder, "guestfish", return_value=completed) as guestfish,
         ):
-            builder.validate_built_image()
+            inspection = builder.inspect_built_image(
+                image=Path("factory.qcow2"), image_format="qcow2"
+            )
+        self.assertEqual(guestfish.call_count, 1)
+        self.assertTrue(guestfish.call_args.kwargs["read_only"])
+        self.assertEqual(inspection.root_uuid, expected.root_uuid)
+        self.assertEqual(inspection.sizes["/etc/machine-id"], 0)
+        self.assertEqual(inspection.globs["/etc/ssh/ssh_host_*"], [])
+
+    def test_development_inspection_omits_factory_only_queries(self):
+        builder = build.Builder(build.parse_args(["--username", "tester"]))
+        builder.admin_user = "tester"
+        token = "OCIINSPECTdeadbeef"
+        values = {
+            "root_uuid": "12345678-1234-1234-1234-123456789abc",
+            "file.0": "root:x:0:0::/root:/bin/bash\ntester:x:1000:1000::/home/tester:/bin/bash",
+            "file.1": (build.PROJECT / "templates/sshd-security-development.conf").read_text().replace(
+                "{{IMAGE_USER}}", "tester"
+            ),
+        }
+        stdout = "\n".join(
+            line
+            for key, value in values.items()
+            for line in (f"{token}:BEGIN:{key}", value, f"{token}:END:{key}")
+        ) + "\n"
+        completed = build.subprocess.CompletedProcess(["guestfish"], 0, stdout, "")
+        with (
+            mock.patch.object(build.secrets, "token_hex", return_value="deadbeef"),
+            mock.patch.object(builder, "guestfish", return_value=completed) as guestfish,
+        ):
+            inspection = builder.inspect_built_image()
+        commands = guestfish.call_args.args[0]
+        self.assertNotIn("cat /etc/shadow", commands)
+        self.assertFalse(inspection.paths)
+        builder.validate_built_image(inspection)
+
+    def test_disk_creation_collects_both_uuids_in_the_import_session(self):
+        with tempfile.TemporaryDirectory() as directory:
+            builder = build.Builder(build.parse_args([]))
+            builder.work = Path(directory)
+            builder.raw = builder.work / "disk.raw"
+            builder.rootfs = builder.work / "rootfs.tar.gz"
+            token = "OCIUUIDdeadbeef"
+            stdout = (
+                f"{token}:BEGIN:root\n12345678-1234-1234-1234-123456789abc\n"
+                f"{token}:END:root\n{token}:BEGIN:esp\nABCD-1234\n{token}:END:esp\n"
+            )
+            completed = build.subprocess.CompletedProcess(["guestfish"], 0, stdout, "")
+            with (
+                mock.patch.object(build, "run"),
+                mock.patch.object(build.secrets, "token_hex", return_value="deadbeef"),
+                mock.patch.object(builder, "guestfish", return_value=completed) as guestfish,
+            ):
+                uuids = builder.create_and_populate_disk()
+        self.assertEqual(
+            uuids,
+            ("12345678-1234-1234-1234-123456789abc", "ABCD-1234"),
+        )
+        self.assertEqual(guestfish.call_count, 1)
+        commands = guestfish.call_args.args[0]
+        self.assertIn("vfs-uuid /dev/sda2", commands)
+        self.assertIn("vfs-uuid /dev/sda1", commands)
+
+    def test_guestfish_inspection_rejects_malformed_framing(self):
+        with self.assertRaisesRegex(RuntimeError, "invalid framing"):
+            build.Builder.parse_guestfish_frames(
+                "TOKEN:BEGIN:key\nvalue\n", "TOKEN", ["key"]
+            )
 
     def test_factory_offline_cleanup_removes_shutdown_generated_identity(self):
         builder = build.Builder(build.parse_args(["--factory-image"]))
         with mock.patch.object(builder, "guestfish") as guestfish:
-            builder.sanitize_factory_image()
+            builder.finalize_built_image()
         commands = guestfish.call_args.args[0]
         self.assertIn("rm-f /var/lib/systemd/random-seed", commands)
         self.assertIn("glob rm-f /etc/ssh/ssh_host_*", commands)
         self.assertIn("truncate-size /etc/machine-id 0", commands)
-        self.assertLess(commands.index("mount /dev/sda2 /"), commands.index("rm-f /var/lib/systemd/random-seed"))
-
-    def test_guest_glob_filters_literal_no_match_result(self):
-        builder = build.Builder(build.parse_args([]))
-        no_matches = build.subprocess.CompletedProcess(
-            ["guestfish"], 0, stdout="/etc/ssh/ssh_host_*\n", stderr=""
+        self.assertIn("rm-f /var/lib/archlinuxarm-oci/build-success", commands)
+        self.assertLess(
+            commands.index("mount /dev/sda2 /"),
+            commands.index("rm-f /var/lib/systemd/random-seed"),
         )
-        with mock.patch.object(builder, "guestfish", return_value=no_matches) as guestfish:
-            self.assertEqual(builder.guest_glob("/etc/ssh/ssh_host_*"), [])
-        self.assertIn("glob echo /etc/ssh/ssh_host_*", guestfish.call_args.args[0])
+
 
 class RepositoryTests(unittest.TestCase):
+    @staticmethod
+    def release_workflow() -> str:
+        return (build.PROJECT / ".github/workflows/release.yml").read_text()
+
     def test_release_workflow_is_image_focused_without_general_ci(self):
-        workflow = (build.PROJECT / ".github/workflows/release.yml").read_text()
+        workflow = self.release_workflow()
         self.assertFalse((build.PROJECT / ".github/workflows/ci.yml").exists())
         self.assertIn("ubuntu-24.04-arm", workflow)
         self.assertIn("--factory-image", workflow)
         self.assertIn("ArchLinuxARM-aarch64", build.DEFAULT_ROOTFS_URL)
-        self.assertIn("build-info.json", workflow)
         self.assertIn("cancel-in-progress: false", workflow)
         self.assertNotIn("pull_request:", workflow)
         self.assertEqual(workflow.count("FORCE_REBUILD: ${{ inputs.force_rebuild }}"), 2)
-        self.assertIn("libguestfs-test-tool", workflow)
-        self.assertIn("SUPERMIN_KERNEL_VERSION", workflow)
-        self.assertIn('sudo install -m 0644 "$runner_kernel" "$kernel"', workflow)
-        self.assertIn('kernel_version="$(uname -r)"', workflow)
+
+    def test_release_workflow_uses_minimal_libguestfs_setup_and_permissions(self):
+        workflow = self.release_workflow()
+        self.assertNotIn("libguestfs-test-tool", workflow)
+        self.assertEqual(workflow.count("run: ./ci/prepare-libguestfs.sh"), 3)
+        self.assertEqual(workflow.count("contents: read"), 1)
+        self.assertEqual(workflow.count("contents: write"), 1)
+
+    def test_release_workflow_smokes_the_uploaded_artifact_before_publish(self):
+        workflow = self.release_workflow()
+        self.assertIn("build-info.json", workflow)
         self.assertIn("--work-dir /tmp/archlinuxarm-oci-work", workflow)
         self.assertNotIn('$RUNNER_TEMP/archlinuxarm-oci-work', workflow)
         self.assertIn("findmnt -T /tmp", workflow)
@@ -522,6 +651,13 @@ class RepositoryTests(unittest.TestCase):
             workflow.index("Smoke-test downloaded QCOW2 artifact"),
             workflow.index("Publish GitHub Release"),
         )
+
+    def test_ci_libguestfs_setup_only_copies_the_hosted_runner_kernel(self):
+        helper = (build.PROJECT / "ci/prepare-libguestfs.sh").read_text()
+        self.assertIn("SUPERMIN_KERNEL_VERSION", helper)
+        self.assertIn('sudo install -m 0644 "$runner_kernel" "$kernel"', helper)
+        self.assertIn('kernel_version="$(uname -r)"', helper)
+        self.assertNotIn("libguestfs-test-tool", helper)
 
     def test_host_dependency_installer_does_not_add_a_second_kernel(self):
         dependencies = (build.PROJECT / "install-deps.sh").read_text()

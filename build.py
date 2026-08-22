@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import atexit
 import base64
+from dataclasses import dataclass
 import getpass
 import hashlib
 import json
@@ -15,6 +16,7 @@ import platform
 import pty
 import re
 import selectors
+import secrets
 import shlex
 import shutil
 import subprocess
@@ -47,6 +49,15 @@ ANSI_YELLOW = "\033[33m"
 ANSI_RED = "\033[31m"
 
 
+@dataclass(frozen=True)
+class ImageInspection:
+    root_uuid: str
+    files: dict[str, str]
+    paths: dict[str, bool]
+    sizes: dict[str, int]
+    globs: dict[str, list[str]]
+
+
 def command(argv: list[object]) -> str:
     return shlex.join([str(item) for item in argv])
 
@@ -76,15 +87,23 @@ def run(argv: list[object], *, capture: bool = False, input_text: str | None = N
         env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
     args = [str(item) for item in argv]
     print_command(args)
-    return subprocess.run(
-        args,
-        check=True,
-        text=True,
-        input=input_text,
-        stdout=subprocess.PIPE if capture else None,
-        stderr=subprocess.PIPE if capture else None,
-        env=env,
-    )
+    try:
+        return subprocess.run(
+            args,
+            check=True,
+            text=True,
+            input=input_text,
+            stdout=subprocess.PIPE if capture else None,
+            stderr=subprocess.PIPE if capture else None,
+            env=env,
+        )
+    except subprocess.CalledProcessError as exc:
+        if capture:
+            if exc.stdout:
+                print(exc.stdout, end="", file=sys.stdout)
+            if exc.stderr:
+                print(exc.stderr, end="", file=sys.stderr)
+        raise
 
 
 def validate_username(value: str) -> str:
@@ -616,11 +635,37 @@ class Builder:
             env=env,
         )
 
+    @staticmethod
+    def framed_guestfish_command(token: str, key: str, operation: str) -> list[str]:
+        return [f"echo {token}:BEGIN:{key}", operation, f"echo {token}:END:{key}"]
+
+    @staticmethod
+    def parse_guestfish_frames(stdout: str, token: str, keys: list[str]) -> dict[str, str]:
+        lines = stdout.splitlines()
+        parsed: dict[str, str] = {}
+        cursor = 0
+        for key in keys:
+            begin = f"{token}:BEGIN:{key}"
+            end = f"{token}:END:{key}"
+            if lines.count(begin) != 1 or lines.count(end) != 1:
+                raise RuntimeError(f"guestfish inspection returned invalid framing for {key}")
+            try:
+                begin_at = lines.index(begin, cursor)
+                end_at = lines.index(end, begin_at + 1)
+            except ValueError as exc:
+                raise RuntimeError(
+                    f"guestfish inspection returned out-of-order framing for {key}"
+                ) from exc
+            parsed[key] = "\n".join(lines[begin_at + 1:end_at])
+            cursor = end_at + 1
+        return parsed
+
     def create_and_populate_disk(self) -> tuple[str, str]:
         assert self.raw and self.rootfs
         print_stage(f"Creating rootless {self.args.image_size} GPT disk with libguestfs")
         run(["qemu-img", "create", "-f", "raw", self.raw, self.args.image_size])
-        self.guestfish([
+        token = "OCIUUID" + secrets.token_hex(8)
+        commands = [
             "run",
             "modprobe vfat",
             "part-init /dev/sda gpt",
@@ -638,22 +683,21 @@ class Builder:
             f"tar-in {guestfish_quote(self.rootfs)} / compress:gzip xattrs:true acls:true",
             "sync",
             "umount-all",
-        ], description="partitioning, formatting, and importing the root filesystem")
-        root_uuid = self.read_uuid("/dev/sda2")
-        esp_uuid = self.read_uuid("/dev/sda1")
-        return root_uuid, esp_uuid
-
-    def read_uuid(self, device: str) -> str:
+        ]
+        commands.extend(self.framed_guestfish_command(token, "root", "vfs-uuid /dev/sda2"))
+        commands.extend(self.framed_guestfish_command(token, "esp", "vfs-uuid /dev/sda1"))
         result = self.guestfish(
-            ["run", f"vfs-uuid {device}"],
-            description=f"reading the filesystem UUID from {device}",
-            read_only=True,
+            commands,
+            description="partitioning, formatting, importing the root filesystem, and reading UUIDs",
             capture=True,
         )
-        values = [line.strip() for line in result.stdout.splitlines() if re.fullmatch(r"[0-9A-Fa-f-]{4,}", line.strip())]
-        if not values:
-            raise RuntimeError(f"could not read filesystem UUID for {device}: {result.stdout!r}")
-        return values[-1]
+        values = self.parse_guestfish_frames(result.stdout, token, ["root", "esp"])
+        root_uuid = values["root"].strip()
+        esp_uuid = values["esp"].strip()
+        for device, value in (("/dev/sda2", root_uuid), ("/dev/sda1", esp_uuid)):
+            if not re.fullmatch(r"[0-9A-Fa-f-]{4,}", value):
+                raise RuntimeError(f"could not read filesystem UUID for {device}: {value!r}")
+        return root_uuid, esp_uuid
 
     @staticmethod
     def write_root_owned_tar(source: Path, destination: Path) -> None:
@@ -779,60 +823,108 @@ class Builder:
         finally:
             self.passwords = None
 
-    def read_guest_file(self, path: str, *, image: Path | None = None,
-                        image_format: str = "raw") -> str:
-        result = self.guestfish(
-            ["run", "mount-ro /dev/sda2 /", f"cat {path}"],
-            description=f"reading {path}",
-            image=image, image_format=image_format, read_only=True, capture=True,
-        )
-        return result.stdout
-
-    def guest_path_exists(self, path: str, *, image: Path | None = None,
-                          image_format: str = "raw") -> bool:
-        result = self.guestfish(
-            ["run", "mount-ro /dev/sda2 /", f"exists {path}"],
-            description=f"checking whether {path} exists",
-            image=image, image_format=image_format, read_only=True, capture=True,
-        )
-        values = [line.strip() for line in result.stdout.splitlines() if line.strip() in {"true", "false"}]
-        if not values:
-            raise RuntimeError(f"could not inspect guest path: {path}")
-        return values[-1] == "true"
-
-    def guest_glob(self, pattern: str, *, image: Path | None = None,
-                   image_format: str = "raw") -> list[str]:
-        result = self.guestfish(
-            ["run", "mount-ro /dev/sda2 /", f"glob echo {pattern}"],
-            description=f"checking for paths matching {pattern}",
-            image=image, image_format=image_format, read_only=True, capture=True,
-        )
-        return [
-            value for line in result.stdout.splitlines()
-            if (value := line.strip()).startswith("/") and value != pattern
-        ]
-
-    def guest_file_size(self, path: str, *, image: Path | None = None,
-                        image_format: str = "raw") -> int:
-        result = self.guestfish(
-            ["run", "mount-ro /dev/sda2 /", f"filesize {guestfish_quote(path)}"],
-            description=f"reading the size of {path}",
-            image=image, image_format=image_format, read_only=True, capture=True,
-        )
-        values = [line.strip() for line in result.stdout.splitlines() if line.strip()]
-        if not values or not values[-1].isdigit():
-            raise RuntimeError(f"could not inspect guest file size: {path}")
-        return int(values[-1])
-
     def verify_build_marker(self) -> None:
-        marker = self.read_guest_file("/var/lib/archlinuxarm-oci/build-success").strip()
+        result = self.guestfish(
+            ["run", "mount-ro /dev/sda2 /", "cat /var/lib/archlinuxarm-oci/build-success"],
+            description="verifying the durable build-success marker",
+            read_only=True,
+            capture=True,
+        )
+        marker = result.stdout.strip()
         if marker != BUILD_SUCCESS.decode():
             raise RuntimeError(f"missing durable build marker: {marker!r}")
 
-    def validate_built_image(self, *, image: Path | None = None,
-                             image_format: str = "raw") -> None:
+    def inspect_built_image(self, *, image: Path | None = None,
+                            image_format: str = "raw") -> ImageInspection:
+        files = [
+            "/etc/passwd",
+            "/etc/ssh/sshd_config.d/10-oci-security.conf",
+        ]
+        paths: list[str] = []
+        sizes: list[str] = []
+        globs: list[str] = []
+        if self.build_mode == "factory":
+            files.extend([
+                "/etc/shadow",
+                "/etc/cloud/cloud.cfg.d/90-oci-alarm.cfg",
+                "/etc/sudoers.d/20-alarm-cloud",
+            ])
+            paths.extend([
+                "/usr/bin/cloud-init",
+                "/usr/lib/systemd/system-generators/cloud-init-generator",
+                "/usr/lib/systemd/system/cloud-init.target",
+                "/usr/lib/systemd/system/cloud-init-local.service",
+                "/usr/lib/systemd/system/cloud-init-main.service",
+                "/usr/lib/systemd/system/cloud-final.service",
+                "/root/.ssh/authorized_keys",
+                "/root/.ssh/authorized_keys2",
+                "/home/alarm/.ssh/authorized_keys",
+                "/home/alarm/.ssh/authorized_keys2",
+                "/var/lib/systemd/random-seed",
+                "/var/lib/cloud/instance",
+            ])
+            sizes.append("/etc/machine-id")
+            globs.extend(["/etc/ssh/ssh_host_*", "/var/lib/cloud/instances/*"])
+        token = "OCIINSPECT" + secrets.token_hex(8)
+        operations: list[tuple[str, str]] = [("root_uuid", "vfs-uuid /dev/sda2")]
+        operations.extend((f"file.{index}", f"cat {path}") for index, path in enumerate(files))
+        operations.extend((f"path.{index}", f"exists {path}") for index, path in enumerate(paths))
+        operations.extend(
+            (f"size.{index}", f"filesize {guestfish_quote(path)}")
+            for index, path in enumerate(sizes)
+        )
+        operations.extend(
+            (f"glob.{index}", f"glob echo {pattern}")
+            for index, pattern in enumerate(globs)
+        )
+        commands = ["run", "mount-ro /dev/sda2 /"]
+        keys: list[str] = []
+        for key, operation in operations:
+            keys.append(key)
+            commands.extend(self.framed_guestfish_command(token, key, operation))
+        commands.append("umount-all")
+        result = self.guestfish(
+            commands,
+            description="collecting the completed-image UUID, policy, and first-boot state",
+            image=image,
+            image_format=image_format,
+            read_only=True,
+            capture=True,
+        )
+        values = self.parse_guestfish_frames(result.stdout, token, keys)
+        root_uuid = values["root_uuid"].strip()
+        if not re.fullmatch(r"[0-9A-Fa-f-]{4,}", root_uuid):
+            raise RuntimeError(f"could not read completed root filesystem UUID: {root_uuid!r}")
+        path_values: dict[str, bool] = {}
+        for index, path in enumerate(paths):
+            value = values[f"path.{index}"].strip()
+            if value not in {"true", "false"}:
+                raise RuntimeError(f"could not inspect guest path {path}: {value!r}")
+            path_values[path] = value == "true"
+        size_values: dict[str, int] = {}
+        for index, path in enumerate(sizes):
+            value = values[f"size.{index}"].strip()
+            if not value.isdigit():
+                raise RuntimeError(f"could not inspect guest file size {path}: {value!r}")
+            size_values[path] = int(value)
+        glob_values = {
+            pattern: [
+                value for line in values[f"glob.{index}"].splitlines()
+                if (value := line.strip()).startswith("/") and value != pattern
+            ]
+            for index, pattern in enumerate(globs)
+        }
+        return ImageInspection(
+            root_uuid=root_uuid,
+            files={path: values[f"file.{index}"] for index, path in enumerate(files)},
+            paths=path_values,
+            sizes=size_values,
+            globs=glob_values,
+        )
+
+    def validate_built_image(self, inspection: ImageInspection) -> None:
         assert self.admin_user
-        passwd = self.read_guest_file("/etc/passwd", image=image, image_format=image_format)
+        passwd = inspection.files["/etc/passwd"]
         interactive: list[str] = []
         for line in passwd.splitlines():
             fields = line.split(":")
@@ -843,10 +935,7 @@ class Builder:
                 interactive.append(fields[0])
         if sorted(interactive) != sorted(["root", self.admin_user]):
             raise RuntimeError(f"unexpected interactive users in completed image: {interactive}")
-        ssh = self.read_guest_file(
-            "/etc/ssh/sshd_config.d/10-oci-security.conf", image=image,
-            image_format=image_format,
-        )
+        ssh = inspection.files["/etc/ssh/sshd_config.d/10-oci-security.conf"]
         if self.build_mode == "factory":
             if self.admin_user != FACTORY_USER or re.search(r"^arch:", passwd, re.MULTILINE):
                 raise RuntimeError("factory image must preserve alarm and must not contain an arch account")
@@ -865,7 +954,7 @@ class Builder:
             if line not in ssh:
                 raise RuntimeError(f"completed image is missing SSH policy: {line}")
         if self.build_mode == "factory":
-            shadow = self.read_guest_file("/etc/shadow", image=image, image_format=image_format)
+            shadow = inspection.files["/etc/shadow"]
             hashes = {
                 fields[0]: fields[1]
                 for line in shadow.splitlines()
@@ -875,15 +964,10 @@ class Builder:
                 not value.startswith(("!", "*")) for value in hashes.values()
             ):
                 raise RuntimeError("factory root and alarm passwords must be locked")
-            cloud_cfg = self.read_guest_file(
-                "/etc/cloud/cloud.cfg.d/90-oci-alarm.cfg", image=image,
-                image_format=image_format,
-            )
+            cloud_cfg = inspection.files["/etc/cloud/cloud.cfg.d/90-oci-alarm.cfg"]
             if "name: alarm" not in cloud_cfg or "lock_passwd: true" not in cloud_cfg:
                 raise RuntimeError("factory image is missing the alarm cloud-init override")
-            sudoers = self.read_guest_file(
-                "/etc/sudoers.d/20-alarm-cloud", image=image, image_format=image_format
-            )
+            sudoers = inspection.files["/etc/sudoers.d/20-alarm-cloud"]
             if "alarm ALL=(ALL:ALL) NOPASSWD: ALL" not in sudoers:
                 raise RuntimeError("factory image is missing passwordless alarm sudo")
             required_paths = (
@@ -895,7 +979,7 @@ class Builder:
                 "/usr/lib/systemd/system/cloud-final.service",
             )
             for path in required_paths:
-                if not self.guest_path_exists(path, image=image, image_format=image_format):
+                if not inspection.paths[path]:
                     raise RuntimeError(f"factory image is missing cloud-init component: {path}")
             forbidden_paths = (
                 "/root/.ssh/authorized_keys", "/root/.ssh/authorized_keys2",
@@ -903,50 +987,39 @@ class Builder:
                 "/var/lib/systemd/random-seed", "/var/lib/cloud/instance",
             )
             for path in forbidden_paths:
-                if self.guest_path_exists(path, image=image, image_format=image_format):
+                if inspection.paths[path]:
                     raise RuntimeError(f"factory image contains forbidden first-boot state: {path}")
-            if self.guest_file_size(
-                "/etc/machine-id", image=image, image_format=image_format
-            ) != 0:
+            if inspection.sizes["/etc/machine-id"] != 0:
                 raise RuntimeError("factory machine-id is not empty")
-            if self.guest_glob(
-                "/etc/ssh/ssh_host_*", image=image, image_format=image_format
-            ) or self.guest_glob(
-                "/var/lib/cloud/instances/*", image=image, image_format=image_format
-            ):
+            if inspection.globs["/etc/ssh/ssh_host_*"] or inspection.globs[
+                "/var/lib/cloud/instances/*"
+            ]:
                 raise RuntimeError("factory image contains generated SSH or cloud-init state")
 
-    def remove_build_marker(self) -> None:
-        self.guestfish([
-            "run", "mount /dev/sda2 /", "rm-f /var/lib/archlinuxarm-oci/build-success", "sync", "umount-all"
-        ], description="removing the temporary build-success marker")
-
-    def sanitize_factory_image(self) -> None:
+    def finalize_built_image(self) -> None:
         """Remove identity and first-boot state after systemd can no longer recreate it."""
-        self.guestfish([
-            "run",
-            "mount /dev/sda2 /",
-            "truncate-size /etc/machine-id 0",
-            "rm-f /var/lib/systemd/random-seed",
-            "glob rm-f /etc/ssh/ssh_host_*",
-            "rm-rf /root/.ssh",
-            f"rm-rf /home/{FACTORY_USER}/.ssh",
-            "rm-rf /var/lib/cloud",
-            "mkdir-p /var/lib/cloud",
+        commands = ["run", "mount /dev/sda2 /"]
+        if self.build_mode == "factory":
+            commands.extend([
+                "truncate-size /etc/machine-id 0",
+                "rm-f /var/lib/systemd/random-seed",
+                "glob rm-f /etc/ssh/ssh_host_*",
+                "rm-rf /root/.ssh",
+                f"rm-rf /home/{FACTORY_USER}/.ssh",
+                "rm-rf /var/lib/cloud",
+                "mkdir-p /var/lib/cloud",
+            ])
+        commands.extend([
+            "rm-f /var/lib/archlinuxarm-oci/build-success",
             "sync",
             "umount-all",
-        ], description="removing machine identity and first-boot state")
-
-    def root_uuid(self, *, image: Path | None = None, image_format: str = "raw") -> str:
-        result = self.guestfish(
-            ["run", "vfs-uuid /dev/sda2"], image=image, image_format=image_format,
-            description="reading the completed root filesystem UUID",
-            read_only=True, capture=True,
+        ])
+        self.guestfish(
+            commands,
+            description="sanitizing first-boot state and removing the temporary build marker"
+            if self.build_mode == "factory"
+            else "removing the temporary build marker",
         )
-        root_uuid = result.stdout.strip()
-        if not root_uuid:
-            raise RuntimeError("could not read the root filesystem UUID")
-        return root_uuid
 
     def find_firmware(self) -> tuple[Path, Path]:
         if self.args.firmware_code or self.args.firmware_vars:
@@ -1146,9 +1219,7 @@ class Builder:
         self.install_build_payload(payload)
         self.run_build_vm()
         self.verify_build_marker()
-        if self.build_mode == "factory":
-            self.sanitize_factory_image()
-        self.remove_build_marker()
+        self.finalize_built_image()
         self.write_state(root_uuid=root_uuid, smoke_passed=False)
         complete = colorize("BUILD STAGE COMPLETE:", ANSI_GREEN)
         print(f"\n{complete} {self.raw}\nWorkspace: {self.work}")
@@ -1168,11 +1239,13 @@ class Builder:
                 raise RuntimeError(f"workspace has no build-state.json: {self.work}")
             self.adopt_state(state)
             image = self.resolve_converted_image(state)
-            root_uuid = self.root_uuid(image=image, image_format="qcow2")
-            if state.get("root_uuid") != root_uuid:
+            inspection = self.inspect_built_image(image=image, image_format="qcow2")
+            if state.get("root_uuid") != inspection.root_uuid:
                 raise RuntimeError("root filesystem UUID does not match workspace state")
-            self.validate_built_image(image=image, image_format="qcow2")
-            self.run_uefi_smoke_test(root_uuid, image=image, image_format="qcow2")
+            self.validate_built_image(inspection)
+            self.run_uefi_smoke_test(
+                inspection.root_uuid, image=image, image_format="qcow2"
+            )
             self.record_smoke_success(state)
             complete = colorize("SMOKE STAGE COMPLETE:", ANSI_GREEN)
             print(f"\n{complete} {image}\nWorkspace: {self.work}")
@@ -1206,7 +1279,10 @@ class Builder:
         self.convert()
         state = self.load_state()
         assert state is not None
-        self.validate_built_image(image=self.output, image_format="qcow2")
+        inspection = self.inspect_built_image(image=self.output, image_format="qcow2")
+        if state.get("root_uuid") != inspection.root_uuid:
+            raise RuntimeError("root filesystem UUID does not match workspace state")
+        self.validate_built_image(inspection)
         self.run_uefi_smoke_test(root_uuid, image=self.output, image_format="qcow2")
         self.record_smoke_success(state)
 

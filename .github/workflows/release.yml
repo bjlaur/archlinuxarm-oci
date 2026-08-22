@@ -22,15 +22,13 @@ on:
       - guest/**
       - overlay/**
       - templates/**
-      - tests/**
+      - ci/**
       - install-deps.sh
-      - requirements.txt
-      - DEPENDENCIES.md
       - .github/workflows/release.yml
 
 permissions:
   actions: read
-  contents: write
+  contents: read
 
 concurrency:
   group: archlinuxarm-oci-release
@@ -133,44 +131,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install build dependencies
-        run: ./install-deps.sh
-
-      - name: Configure and verify libguestfs appliance
-        run: |
-          kernel_version="$(uname -r)"
-          runner_kernel="/boot/vmlinuz-$kernel_version"
-          kernel="$RUNNER_TEMP/libguestfs-vmlinuz-$kernel_version"
-          modules="/lib/modules/$kernel_version"
-          if [[ ! -f "$runner_kernel" ]]; then
-            echo "The running kernel image is missing: $runner_kernel" >&2
-            exit 1
-          fi
-          if [[ ! -d "$modules" ]]; then
-            echo "Kernel modules are missing for $kernel_version." >&2
-            exit 1
-          fi
-          sudo install -m 0644 "$runner_kernel" "$kernel"
-          {
-            echo "SUPERMIN_KERNEL=$kernel"
-            echo "SUPERMIN_KERNEL_VERSION=$kernel_version"
-            echo "SUPERMIN_MODULES=$modules"
-          } >> "$GITHUB_ENV"
-          export SUPERMIN_KERNEL="$kernel"
-          export SUPERMIN_KERNEL_VERSION="$kernel_version"
-          export SUPERMIN_MODULES="$modules"
-          echo "libguestfs appliance kernel: $kernel_version"
-          if ! libguestfs-test-tool; then
-            echo "libguestfs self-test failed; rerunning with debug tracing" >&2
-            LIBGUESTFS_DEBUG=1 LIBGUESTFS_TRACE=1 libguestfs-test-tool
-          fi
-
-      - name: Run source and environment checks
+      - name: Run source checks
         run: |
           python3 -m unittest discover -s tests -v
           python3 -m py_compile build.py
-          bash -n guest/*.sh install-deps.sh
-          ./build.py --check
+          bash -n ci/*.sh guest/*.sh install-deps.sh
+
+      - name: Install build dependencies
+        run: ./install-deps.sh
+
+      - name: Configure libguestfs appliance
+        run: ./ci/prepare-libguestfs.sh
+
+      - name: Check build environment
+        run: ./build.py --check
 
       - name: Prepare release names
         id: names
@@ -256,30 +230,8 @@ jobs:
       - name: Install smoke-test dependencies
         run: ./install-deps.sh
 
-      - name: Configure and verify libguestfs appliance
-        run: |
-          kernel_version="$(uname -r)"
-          runner_kernel="/boot/vmlinuz-$kernel_version"
-          kernel="$RUNNER_TEMP/libguestfs-vmlinuz-$kernel_version"
-          modules="/lib/modules/$kernel_version"
-          if [[ ! -f "$runner_kernel" || ! -d "$modules" ]]; then
-            echo "The running kernel or its modules are unavailable for libguestfs." >&2
-            exit 1
-          fi
-          sudo install -m 0644 "$runner_kernel" "$kernel"
-          {
-            echo "SUPERMIN_KERNEL=$kernel"
-            echo "SUPERMIN_KERNEL_VERSION=$kernel_version"
-            echo "SUPERMIN_MODULES=$modules"
-          } >> "$GITHUB_ENV"
-          export SUPERMIN_KERNEL="$kernel"
-          export SUPERMIN_KERNEL_VERSION="$kernel_version"
-          export SUPERMIN_MODULES="$modules"
-          echo "libguestfs appliance kernel: $kernel_version"
-          if ! libguestfs-test-tool; then
-            echo "libguestfs self-test failed; rerunning with debug tracing" >&2
-            LIBGUESTFS_DEBUG=1 LIBGUESTFS_TRACE=1 libguestfs-test-tool
-          fi
+      - name: Configure libguestfs appliance
+        run: ./ci/prepare-libguestfs.sh
 
       - name: Download converted image artifact
         uses: actions/download-artifact@v4
@@ -307,6 +259,9 @@ jobs:
   publish:
     needs: [decide, build, smoke]
     runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: write
     steps:
       - uses: actions/checkout@v4
 
@@ -403,30 +358,8 @@ jobs:
       - name: Install smoke-test dependencies
         run: ./install-deps.sh
 
-      - name: Configure and verify libguestfs appliance
-        run: |
-          kernel_version="$(uname -r)"
-          runner_kernel="/boot/vmlinuz-$kernel_version"
-          kernel="$RUNNER_TEMP/libguestfs-vmlinuz-$kernel_version"
-          modules="/lib/modules/$kernel_version"
-          if [[ ! -f "$runner_kernel" || ! -d "$modules" ]]; then
-            echo "The running kernel or its modules are unavailable for libguestfs." >&2
-            exit 1
-          fi
-          sudo install -m 0644 "$runner_kernel" "$kernel"
-          {
-            echo "SUPERMIN_KERNEL=$kernel"
-            echo "SUPERMIN_KERNEL_VERSION=$kernel_version"
-            echo "SUPERMIN_MODULES=$modules"
-          } >> "$GITHUB_ENV"
-          export SUPERMIN_KERNEL="$kernel"
-          export SUPERMIN_KERNEL_VERSION="$kernel_version"
-          export SUPERMIN_MODULES="$modules"
-          echo "libguestfs appliance kernel: $kernel_version"
-          if ! libguestfs-test-tool; then
-            echo "libguestfs self-test failed; rerunning with debug tracing" >&2
-            LIBGUESTFS_DEBUG=1 LIBGUESTFS_TRACE=1 libguestfs-test-tool
-          fi
+      - name: Configure libguestfs appliance
+        run: ./ci/prepare-libguestfs.sh
 
       - name: Download image artifact from prior run
         uses: actions/download-artifact@v4

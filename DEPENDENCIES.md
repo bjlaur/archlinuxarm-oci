@@ -27,9 +27,10 @@ sudo apt-get install python3 qemu-utils qemu-system-arm qemu-efi-aarch64 libgues
 
 Supermin needs read access to a kernel image to construct the libguestfs
 appliance. GitHub's hosted ARM runner restricts its Azure boot kernel, so the
-release workflow uses `sudo` once to make a mode-0644 copy in the ephemeral
-runner temp directory. It then uses supermin's documented kernel-selection
-environment variables and runs libguestfs and the image builder unprivileged.
+release workflow's `ci/prepare-libguestfs.sh` helper uses `sudo` once per job to
+make a mode-0644 copy in the ephemeral runner temp directory. It then uses
+supermin's documented kernel-selection environment variables. Libguestfs and
+the image builder themselves run unprivileged.
 
 ## Required commands
 

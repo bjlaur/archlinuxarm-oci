@@ -81,7 +81,8 @@ Every published image must pass:
 1. detached OpenPGP verification of the rootfs against the pinned full
    fingerprint;
 2. a rootless AArch64 configuration boot;
-3. offline account, SSH, cloud-init, identity, and bootloader validation;
+3. account, SSH, cloud-init, identity, and bootloader inspection in one
+   read-only libguestfs session;
 4. zstd QCOW2 conversion followed by `qemu-img check` and SHA-256 generation;
    and
 5. a real AArch64 UEFI boot of that exact QCOW2 artifact, through a disposable
@@ -166,16 +167,17 @@ Use a disk-backed workspace when `/tmp` is a RAM-backed tmpfs.
 ```
 
 KVM can substantially accelerate package installation and the UEFI smoke boot.
-TCG works on x86_64 hosts and ARM64 systems without accessible KVM. The same
-selection is applied to both project-managed QEMU stages; libguestfs manages
-its own appliance acceleration.
+TCG works on x86_64 hosts and ARM64 systems without accessible KVM. The
+selection is applied to both project-managed QEMU stages. Libguestfs uses its
+direct backend with workspace-local cache and temporary directories; an
+explicit `--accel tcg` also forces its appliance to use TCG.
 
 ### Local checks
 
 ```bash
 python3 -m unittest discover -s tests -v
 python3 -m py_compile build.py
-bash -n guest/*.sh install-deps.sh
+bash -n ci/*.sh guest/*.sh install-deps.sh
 ./build.py --check
 ```
 
