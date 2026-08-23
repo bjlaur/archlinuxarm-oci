@@ -107,8 +107,8 @@ Owner: Codex, after the user confirms Phase 1
    `https://github.com/bjlaur/archlinuxarm-oci` into a clean workspace.
 2. Record the exact baseline commit and inspect the current worktree, workflows,
    deployment script, tests, and documentation.
-3. Review `AGENTS.md` and `docs/CODE-REVIEW.md`; do not blindly replay details
-   from this deferred plan when the repository has changed.
+3. Review `AGENTS.md` and `docs/POTENTIAL-FUTURE-WORK.md`; do not blindly replay
+   details from this deferred plan when the repository has changed.
 4. Run all existing offline tests before editing.
 5. Inspect the current release artifact boundary to determine whether the OCI
    test can consume the exact pre-release QCOW2 directly or initially needs to

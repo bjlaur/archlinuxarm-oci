@@ -224,6 +224,7 @@ instructions.
 - [OCI preparation](OCI-PREPARATION.md): tenancy, CLI, IAM, and networking.
 - [OCI deployment](OCI-DEPLOYMENT.md): full automation and manual procedure.
 - [Developer guide](../DEVELOPERS.md): build and maintenance workflow.
-- [Code review](CODE-REVIEW.md): prioritized implementation findings.
+- [Potential future work](POTENTIAL-FUTURE-WORK.md): deferred hardening and
+  maintenance ideas.
 - [OCI smoke CI plan](OCI-SMOKE-CI-PLAN.md): deferred proposal for real-OCI
   acceptance testing from GitHub Actions.

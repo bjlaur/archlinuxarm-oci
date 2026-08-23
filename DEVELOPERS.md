@@ -251,5 +251,5 @@ known-hosts state, OCI API private keys, or instance SSH private keys.
 
 - [Repository instructions](AGENTS.md) records the durable safety and
   validation invariants for automated contributors.
-- [Repository code review](docs/CODE-REVIEW.md) records fixed and outstanding
-  findings against commit `0735370`.
+- [Potential future work](docs/POTENTIAL-FUTURE-WORK.md) records deferred
+  hardening and maintenance ideas.

@@ -44,7 +44,7 @@ credentials. Development images are credentialed and must never be published.
 Treat a deployment state file as authorization for destructive cleanup. Do not
 hand-edit ownership flags, resource OCIDs, deployment UUIDs, or release hashes.
 Object Storage live-marker validation remains an outstanding hardening item;
-see `docs/CODE-REVIEW.md`.
+see `docs/POTENTIAL-FUTURE-WORK.md`.
 
 ## Build and release invariants
 
@@ -85,5 +85,5 @@ python3 tests/excluded_test_oci_cli.py -v
 
 Use `README.md` for the user happy path, `docs/README.md` for technical
 operation, `DEVELOPERS.md` for build and release maintenance, the focused OCI
-guides for tenancy and deployment procedures, and `docs/CODE-REVIEW.md` for
-prioritized outstanding findings.
+guides for tenancy and deployment procedures, and
+`docs/POTENTIAL-FUTURE-WORK.md` for non-committed future ideas.

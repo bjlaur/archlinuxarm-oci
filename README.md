@@ -134,7 +134,7 @@ network security lists or NSGs remain responsible for inbound access.
   resume, cleanup, networking, and diagnostics.
 - [Developer guide](DEVELOPERS.md): dependencies, build architecture, local
   builds, tests, CI, and releases.
-- [Code review](docs/CODE-REVIEW.md): prioritized findings from the full
-  repository review.
+- [Potential future work](docs/POTENTIAL-FUTURE-WORK.md): deferred hardening
+  and maintenance ideas.
 
 License: [MIT](LICENSE).
