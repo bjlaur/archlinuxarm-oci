@@ -4,6 +4,7 @@ import inspect
 import json
 import os
 from pathlib import Path
+import re
 import sys
 import tarfile
 import tempfile
@@ -378,6 +379,66 @@ class ArchiveTests(unittest.TestCase):
             self.assertEqual(metadata["build_mode"], "development")
             self.assertEqual(metadata["image_user"], "tester")
 
+    def test_output_preflight_includes_checksum_and_shared_metadata(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            output = base / "new-image.qcow2"
+            (base / "new-image.qcow2.sha256").write_text("old checksum\n")
+            (base / "build-info.json").write_text(
+                json.dumps({"image_filename": "other-image.qcow2"})
+            )
+            builder = build.Builder(build.parse_args(["--output", str(output)]))
+            with (
+                mock.patch.object(sys.stdin, "isatty", return_value=False),
+                self.assertRaisesRegex(SystemExit, "other-image.qcow2") as raised,
+            ):
+                builder.confirm_output()
+            message = str(raised.exception)
+            self.assertIn("new-image.qcow2.sha256", message)
+            self.assertIn("build-info.json", message)
+            self.assertIn("--force", message)
+
+    def test_output_preflight_uses_one_interactive_confirmation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            output = base / "output.qcow2"
+            output.write_bytes(b"old image")
+            (base / "output.qcow2.sha256").write_text("old checksum\n")
+            (base / "build-info.json").write_text("{}\n")
+            builder = build.Builder(build.parse_args(["--output", str(output)]))
+            with (
+                mock.patch.object(sys.stdin, "isatty", return_value=True),
+                mock.patch("builtins.input", return_value="yes") as prompt,
+            ):
+                builder.confirm_output()
+            prompt.assert_called_once()
+
+    def test_output_preflight_force_allows_named_artifact_collisions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            output = base / "output.qcow2"
+            (base / "build-info.json").write_text("unrelated metadata\n")
+            builder = build.Builder(
+                build.parse_args(["--output", str(output), "--force"])
+            )
+            builder.confirm_output()
+
+    def test_download_metadata_uses_atomic_replacement(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            output = base / "output.qcow2"
+            builder = build.Builder(build.parse_args(["--output", str(output)]))
+            state = {"build_mode": "factory", "image_user": "alarm"}
+            digest = "a" * 64
+            with mock.patch.object(build.os, "replace", wraps=build.os.replace) as replace:
+                builder.write_download_metadata(digest, state)
+            self.assertEqual(replace.call_count, 2)
+            self.assertFalse(list(base.glob(".*.tmp")))
+            self.assertEqual(
+                (base / "output.qcow2.sha256").read_text(),
+                f"{digest}  output.qcow2\n",
+            )
+
     def test_failed_conversion_removes_partial_output(self):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
@@ -690,9 +751,13 @@ class RepositoryTests(unittest.TestCase):
     def upstream_workflow() -> str:
         return (build.PROJECT / ".github/workflows/check-upstream.yml").read_text()
 
-    def test_release_workflow_is_image_focused_without_general_ci(self):
+    @staticmethod
+    def source_workflow() -> str:
+        return (build.PROJECT / ".github/workflows/ci.yml").read_text()
+
+    def test_release_workflow_remains_image_focused_with_separate_source_ci(self):
         workflow = self.release_workflow()
-        self.assertFalse((build.PROJECT / ".github/workflows/ci.yml").exists())
+        self.assertTrue((build.PROJECT / ".github/workflows/ci.yml").exists())
         self.assertIn("ubuntu-24.04-arm", workflow)
         self.assertIn("--factory-image", workflow)
         self.assertIn("ArchLinuxARM-aarch64", build.DEFAULT_ROOTFS_URL)
@@ -722,6 +787,33 @@ class RepositoryTests(unittest.TestCase):
         self.assertIn("if: steps.decision.outputs.dispatch == 'true'", workflow)
         self.assertIn("gh workflow run release.yml --ref main", workflow)
 
+    def test_source_workflow_runs_all_offline_checks(self):
+        workflow = self.source_workflow()
+        self.assertIn("name: Source checks", workflow)
+        self.assertIn("pull_request:", workflow)
+        self.assertIn("push:", workflow)
+        self.assertIn("contents: read", workflow)
+        self.assertIn("python3 -m unittest discover -s tests -v", workflow)
+        self.assertIn("python3 tests/excluded_test_download_latest.py -v", workflow)
+        self.assertIn(
+            "python3 -m py_compile build.py deploy-oci.py download-latest.py",
+            workflow,
+        )
+        self.assertIn("bash -n ci/*.sh guest/*.sh install-deps.sh", workflow)
+        self.assertNotIn("./install-deps.sh", workflow)
+        self.assertNotIn("./build.py --factory-image", workflow)
+
+    def test_workflows_pin_actions_and_dependabot_updates_them(self):
+        workflows = "\n".join(
+            path.read_text() for path in (build.PROJECT / ".github/workflows").glob("*.yml")
+        )
+        action_refs = re.findall(r"uses:\s+actions/[^@\s]+@([^\s#]+)", workflows)
+        self.assertTrue(action_refs)
+        self.assertTrue(all(re.fullmatch(r"[0-9a-f]{40}", ref) for ref in action_refs))
+        dependabot = (build.PROJECT / ".github/dependabot.yml").read_text()
+        self.assertIn("package-ecosystem: github-actions", dependabot)
+        self.assertIn("interval: weekly", dependabot)
+
     def test_release_workflow_uses_minimal_libguestfs_setup_and_permissions(self):
         workflow = self.release_workflow()
         self.assertNotIn("libguestfs-test-tool", workflow)
@@ -733,6 +825,7 @@ class RepositoryTests(unittest.TestCase):
         preparation = (build.PROJECT / "docs/OCI-PREPARATION.md").read_text()
         deployment = (build.PROJECT / "docs/OCI-DEPLOYMENT.md").read_text()
         readme = (build.PROJECT / "README.md").read_text()
+        developers = (build.PROJECT / "DEVELOPERS.md").read_text()
         self.assertIn("OCI-DEPLOYMENT.md", preparation)
         self.assertIn("OCI-PREPARATION.md", deployment)
         self.assertIn("--dry-run", deployment)
@@ -749,7 +842,7 @@ class RepositoryTests(unittest.TestCase):
         self.assertIn("OCI-DEPLOYMENT.md", readme)
         self.assertIn(
             "python3 -m py_compile build.py deploy-oci.py download-latest.py",
-            readme,
+            developers,
         )
 
     def test_release_workflow_smokes_the_uploaded_artifact_before_publish(self):
@@ -773,6 +866,18 @@ class RepositoryTests(unittest.TestCase):
         )
         self.assertLess(
             workflow.index("Smoke-test downloaded QCOW2 artifact"),
+            workflow.index("Publish GitHub Release"),
+        )
+
+    def test_release_workflow_attests_tested_artifacts_before_publish(self):
+        workflow = self.release_workflow()
+        self.assertIn("attestations: write", workflow)
+        self.assertIn("id-token: write", workflow)
+        self.assertRegex(workflow, r"uses: actions/attest@[0-9a-f]{40} # v4")
+        self.assertIn("Attest tested release artifacts", workflow)
+        self.assertIn("build-info.json", workflow)
+        self.assertLess(
+            workflow.index("Attest tested release artifacts"),
             workflow.index("Publish GitHub Release"),
         )
 

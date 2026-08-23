@@ -1,269 +1,138 @@
 # Arch Linux ARM for Oracle Cloud Infrastructure
 
-This project publishes a community-built Arch Linux ARM AArch64 factory image
-for Oracle Cloud Infrastructure Ampere A1 (`VM.Standard.A1.Flex`).
+Community-built Arch Linux ARM AArch64 images for Oracle Cloud Infrastructure
+Ampere A1 (`VM.Standard.A1.Flex`). The images start from the signed official
+Arch Linux ARM generic AArch64 root filesystem.
 
-The image is based on the signed official Arch Linux ARM generic AArch64
-rootfs. It is not an official Arch Linux or Arch Linux ARM image.
+This is not an official Arch Linux, Arch Linux ARM, or Oracle image.
 
-## Download and verify
+## Download the latest image
 
-### Automated download
-
-Download and verify the latest image in the current directory:
+The easiest option downloads the current QCOW2, its checksum, and build
+metadata, then verifies that all three agree:
 
 ```bash
-curl -fsSLO https://raw.githubusercontent.com/bjlaur/archlinuxarm-oci/main/download-latest.py && python3 download-latest.py
+curl -fsSLO https://raw.githubusercontent.com/bjlaur/archlinuxarm-oci/main/download-latest.py
+python3 download-latest.py
 ```
 
-The downloader requires `curl` and Python 3.8 or newer. Curl provides transfer
-progress and retry handling; Python validates the release metadata and keeps an
-image only after its SHA-256 matches both published checksum sources. The
-script refuses to overwrite existing downloads. Pass a directory as its only
-argument to save the assets somewhere else.
+Requirements: Python 3.8 or newer and `curl`. Pass a directory to download
+somewhere other than the current directory:
 
-### Manual download
+```bash
+python3 download-latest.py ~/Downloads/archlinuxarm-oci
+```
 
-Open the
-[latest release](https://github.com/bjlaur/archlinuxarm-oci/releases/latest)
-in your browser and download these three assets:
-
-- the `.qcow2` image;
-- its matching `.qcow2.sha256` checksum file; and
-- `build-info.json`.
-
-Then change to the directory containing the downloads and verify the image:
+You can instead download the QCOW2, matching `.sha256` file, and
+`build-info.json` from the [latest GitHub
+Release](https://github.com/bjlaur/archlinuxarm-oci/releases/latest), then run:
 
 ```bash
 sha256sum -c -- *.qcow2.sha256
 ```
 
-You can also verify the image directly against the checksum and filename in
-`build-info.json`:
+Published artifacts also carry signed GitHub Actions provenance. With the
+[GitHub CLI](https://cli.github.com/), verify that the exact QCOW2 was produced
+by this repository's workflow:
 
 ```bash
-python3 -c '
-import json
-info = json.load(open("build-info.json"))
-print("{}  {}".format(info["image_sha256"], info["image_filename"]))
-' | sha256sum -c -
+gh attestation verify *.qcow2 --repo bjlaur/archlinuxarm-oci
 ```
 
-`build-info.json` records the project commit, upstream rootfs URL and checksum,
-pinned signing fingerprint, image checksum, and build/smoke acceleration modes.
+## Deploy it automatically
 
-## Deploy on OCI
+`deploy-oci.py` is the experimental happy-path deployer. It uses the official
+OCI CLI to download and verify the release, upload it to Object Storage, import
+it as a custom image, launch an A1 instance, and optionally verify first boot
+over SSH.
 
-For a manual deployment, upload the QCOW2 to OCI Object Storage and import it
-as a custom image with:
-
-```text
-Image type:   QCOW2
-OS:           Linux
-Launch mode:  Paravirtualized
-Firmware:     UEFI_64
-Shape:        VM.Standard.A1.Flex
-```
-
-Supply your SSH public key through OCI's normal instance-launch flow. After the
-instance boots, connect as:
-
-```bash
-ssh alarm@INSTANCE_IP
-```
-
-The full [OCI deployment guide](docs/OCI-DEPLOYMENT.md) includes a manual
-Console/CLI checklist for importing the image, setting capabilities, launching
-the instance, verifying first boot, and cleaning up temporary Object Storage
-resources.
-
-Alternatively, `deploy-oci.py` can automatically download and verify the latest
-image, import it, launch an A1 instance, and verify its first boot:
+First clone the repository and configure the OCI CLI:
 
 ```bash
 git clone https://github.com/bjlaur/archlinuxarm-oci.git
 cd archlinuxarm-oci
 pipx install oci-cli
 oci setup config
+oci os ns get
 ```
 
-After registering the generated API public key and completing the one-time OCI
-IAM and network preparation, run the read-only check and then deploy:
+Your OCI account also needs a compartment, suitable VCN/subnet, and the
+required IAM permissions. The [OCI preparation
+guide](docs/OCI-PREPARATION.md) walks through that one-time setup.
+
+Run the read-only OCI check first. It still downloads the image and creates a
+local instance SSH key if needed, but it does not create or modify OCI
+resources:
 
 ```bash
 ./deploy-oci.py --assign-public-ip --dry-run
-./deploy-oci.py \
-  --assign-public-ip \
-  --reuse-download \
-  --verify-ssh \
-  --cleanup-bucket
 ```
 
-See [Prepare OCI for deployment](docs/OCI-PREPARATION.md) for the one-time
-account, IAM, and network setup. See the full [OCI deployment
-guide](docs/OCI-DEPLOYMENT.md) for discovery behavior, overrides, manual
-deployment, resume, cleanup, and troubleshooting.
-
-The source disk is 4 GiB. `oci-grow-root.service` expands partition 2 and its
-ext4 filesystem when the instance uses a larger OCI boot volume.
-
-## Factory image security
-
-| Account | Console password | SSH | sudo |
-| --- | --- | --- | --- |
-| `root` | locked | disabled | n/a |
-| `alarm` | `alarm` | OCI-provided public key only | passwordless |
-
-Published factory images contain:
-
-- no usable root password;
-- no baked-in authorized SSH key;
-- no persistent SSH host keys;
-- no machine identity or random seed; and
-- no cloud-init instance state from the build.
-
-On first boot, cloud-init's Oracle datasource obtains the instance metadata,
-applies OCI's SSH key to the existing upstream `alarm` account, and processes
-supported user-data and hostname metadata. SSH password authentication and root
-SSH remain disabled. Network ingress is controlled by OCI security lists or
-network security groups. The image does not configure or enable a static host firewall;
-SSHGuard dynamically blocks sources that repeatedly fail SSH authentication.
-
-## Automated releases
-
-The lightweight `Check for Arch Linux ARM rootfs update` workflow checks the
-small checksum file adjacent to the upstream rootfs each day and after every
-push to `main`. When the checksum changes, it dispatches the separate `Build and
-publish factory image` workflow. The release workflow can also be started
-manually with a forced rebuild. Repository commits do not automatically replace
-an existing release; maintainers force a rebuild when code changes require a
-new image.
-
-Every published image must pass:
-
-1. detached OpenPGP verification of the rootfs against the pinned full
-   fingerprint;
-2. a rootless AArch64 configuration boot;
-3. account, SSH, cloud-init, identity, and bootloader inspection in one
-   read-only libguestfs session;
-4. zstd QCOW2 conversion followed by `qemu-img check` and SHA-256 generation;
-   and
-5. a real AArch64 UEFI boot of that exact QCOW2 artifact, through a disposable
-   overlay and with NoCloud metadata proving SSH-key provisioning and
-   passwordless administration.
-
-The converted QCOW2 and `build-state.json` are uploaded before the smoke job.
-If smoke testing fails, that exact artifact remains available for reproduction;
-failed builds do not replace the latest release.
-
-## Development images
-
-The builder also retains a development mode for manual testing. Development
-images ask for a custom administrator and separate root/administrator
-passwords. They enable password SSH only for that administrator and require its
-password for sudo. Development builds also convert before smoke testing, so the
-exact failed QCOW2 is retained for local diagnosis. Development images are
-never published as releases.
-
-## Building from source
-
-Most users do not need this section. Building requires QEMU, libguestfs,
-AArch64 UEFI firmware, GnuPG, curl, and Python 3.11 or newer.
+Then reuse that verified download, launch the instance, verify SSH, and remove
+the temporary import object and bucket after success:
 
 ```bash
-./install-deps.sh
-./build.py --check
+./deploy-oci.py --assign-public-ip --reuse-download --verify-ssh --cleanup-bucket
 ```
 
-Dependency installation may use `sudo` to install missing host packages. The
-image builder itself is rootless, never invokes `sudo`, and refuses to run as
-root.
+The tool interactively discovers a subnet and A1-capable availability domain
+when there is more than one choice. It defaults to 1 OCPU, 6 GB RAM, and a 50
+GB boot volume. Use `--no-public-ip` instead when the machine running the
+deployer can reach a private subnet.
 
-Build a credential-free factory image:
+After launch:
 
 ```bash
-./build.py --factory-image
+ssh -i ~/.ssh/archlinuxarm-oci alarm@INSTANCE_IP
 ```
 
-Build a development image:
+The image build installs its small set of required packages after refreshing
+the package databases, but deliberately does not perform the much slower full
+system upgrade. Bring the new instance fully current soon after first login:
 
 ```bash
-./build.py
-./build.py --username myadmin
+sudo pacman -Syu
 ```
 
-For disposable automated testing only, one command-line password can be used
-for both development accounts. It may be visible in shell history and process
-listings and must never be used for a real image:
+Until that command completes, the instance is technically in a partial-upgrade
+state. Do the upgrade before installing additional packages or treating the
+instance as long-lived.
 
-```bash
-./build.py --username testadmin --password TEST-ONLY-PASSWORD
-```
+If a deployment is interrupted, keep `.deploy-oci-state.json` and rerun the
+same command with `--resume`. See the [full OCI deployment
+guide](docs/OCI-DEPLOYMENT.md) before using overrides, resuming, cleaning up a
+partial deployment, or deploying manually.
 
-### Staged and resumable builds
+## Image defaults
 
-An explicit workspace is retained and must be empty for the build stage. Later
-stages infer factory or development mode and the converted image name from its
-versioned `build-state.json`. Both modes convert before boot-testing the exact
-QCOW2:
+| Setting | Default |
+| --- | --- |
+| Architecture | AArch64 |
+| Boot | GPT + UEFI |
+| OCI launch mode | Paravirtualized |
+| Login user | `alarm` |
+| SSH authentication | OCI-provided public key only |
+| Root login | Locked; root SSH disabled |
+| `alarm` sudo | Passwordless |
+| Source disk | 4 GiB, expanded on first boot |
 
-```bash
-./build.py --factory-image --work-dir /path/to/work --build-only
-./build.py --work-dir /path/to/work --convert-only
-./build.py --work-dir /path/to/work --smoke-test-only
-```
+The published image contains no baked-in SSH key, persistent SSH host key,
+machine identity, random seed, or retained cloud-init instance state. OCI
+network security lists or NSGs remain responsible for inbound access.
 
-When `--output` is omitted for a staged build, the QCOW2 is written inside the
-workspace. Conversion records its filename, size, format, and SHA-256 so a
-relocated workspace or downloaded CI artifact can be verified before smoke
-testing.
+## More documentation
 
-Use a disk-backed workspace when `/tmp` is a RAM-backed tmpfs.
+- [Technical guide](docs/README.md): image layout, boot flow, verification,
+  security model, deployment state, and troubleshooting.
+- [Prepare OCI](docs/OCI-PREPARATION.md): CLI, IAM, compartment, network, and
+  A1 prerequisites.
+- [Detailed OCI deployment](docs/OCI-DEPLOYMENT.md): automation, manual import,
+  resume, cleanup, networking, and diagnostics.
+- [Developer guide](DEVELOPERS.md): dependencies, build architecture, local
+  builds, tests, CI, and releases.
+- [Code review](docs/CODE-REVIEW.md): prioritized findings from the full
+  repository review.
+- [Maintainer handoff](CODEX-HANDOFF.md): review scope, implemented changes,
+  validation, and remaining work.
 
-### QEMU acceleration
-
-```text
---accel auto   default; use KVM on native ARM64 when it is actually usable,
-               otherwise fall back to TCG
---accel kvm    require KVM and fail if it is unavailable
---accel tcg    always use portable software emulation
-```
-
-KVM can substantially accelerate package installation and the UEFI smoke boot.
-TCG works on x86_64 hosts and ARM64 systems without accessible KVM. The
-selection is applied to both project-managed QEMU stages. Libguestfs uses its
-direct backend with workspace-local cache and temporary directories; an
-explicit `--accel tcg` also forces its appliance to use TCG.
-
-### Local checks
-
-```bash
-python3 -m unittest discover -s tests -v
-python3 -m py_compile build.py deploy-oci.py download-latest.py
-bash -n ci/*.sh guest/*.sh install-deps.sh
-./build.py --check
-```
-
-Downloader-specific tests are intentionally excluded from the default suite.
-Run them explicitly after changing `download-latest.py`:
-
-```bash
-python3 tests/excluded_test_download_latest.py -v
-```
-
-The optional OCI CLI command-surface test is also excluded so normal source and
-image checks do not require OCI tooling or credentials. It reads local command
-help only and makes no API requests:
-
-```bash
-python3 tests/excluded_test_oci_cli.py -v
-```
-
-Build progress is colorized on terminals. Redirected output is plain text; set
-`NO_COLOR=1` to disable color explicitly.
-
-## License
-
-The original code and documentation in this repository are available under the
-[MIT License](LICENSE). Software distributed inside the generated image retains
-its respective upstream licenses.
+License: [MIT](LICENSE).

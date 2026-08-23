@@ -74,6 +74,29 @@ def command(argv: list[object]) -> str:
     return shlex.join([str(item) for item in argv])
 
 
+def atomic_write_text(path: Path, contents: str) -> None:
+    """Replace a public text artifact without exposing a partial write."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+    )
+    temporary = Path(temporary_name)
+    try:
+        os.fchmod(descriptor, 0o644)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as destination:
+            destination.write(contents)
+            destination.flush()
+            os.fsync(destination.fileno())
+        os.replace(temporary, path)
+    except BaseException:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        temporary.unlink(missing_ok=True)
+        raise
+
+
 def colorize(text: str, style: str, *, stream: object | None = None) -> str:
     """Apply terminal color without polluting redirected output or logs."""
     output = sys.stdout if stream is None else stream
@@ -499,7 +522,7 @@ class Builder:
 
     def write_download_metadata(self, digest: str, state: dict[str, object]) -> None:
         checksum_path = self.output.with_suffix(self.output.suffix + ".sha256")
-        checksum_path.write_text(f"{digest}  {self.output.name}\n", encoding="utf-8")
+        atomic_write_text(checksum_path, f"{digest}  {self.output.name}\n")
 
         git_sha = self.current_git_sha()
         metadata = {
@@ -520,7 +543,10 @@ class Builder:
         if state["build_mode"] == "factory":
             metadata["factory_user"] = state["image_user"]
         metadata_path = self.output.parent / "build-info.json"
-        metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        atomic_write_text(
+            metadata_path,
+            json.dumps(metadata, indent=2, sort_keys=True) + "\n",
+        )
 
     def resolve_converted_image(self, state: dict[str, object]) -> Path:
         assert self.work
@@ -593,13 +619,43 @@ class Builder:
         return state
 
     def confirm_output(self) -> None:
-        if not self.output.exists():
+        artifacts = (
+            self.output,
+            self.output.with_suffix(self.output.suffix + ".sha256"),
+            self.output.parent / "build-info.json",
+        )
+        existing = [artifact for artifact in artifacts if artifact.exists()]
+        if not existing:
             return
         if self.args.force:
             return
+        details = "\n".join(f"  - {artifact}" for artifact in existing)
+        metadata = self.output.parent / "build-info.json"
+        metadata_warning = ""
+        if metadata in existing:
+            try:
+                recorded = json.loads(metadata.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                recorded = None
+            recorded_name = (
+                recorded.get("image_filename") if isinstance(recorded, dict) else None
+            )
+            if isinstance(recorded_name, str) and recorded_name != self.output.name:
+                metadata_warning = (
+                    f"\n  build-info.json currently describes {recorded_name}, "
+                    f"not {self.output.name}."
+                )
         if not sys.stdin.isatty():
-            raise SystemExit(f"output exists: {self.output}; pass --force to replace it")
-        answer = input(f"Replace existing {self.output}? [y/N] ").strip().lower()
+            raise SystemExit(
+                "output artifacts already exist:\n"
+                f"{details}{metadata_warning}\n"
+                "pass --force to replace these three named build artifacts"
+            )
+        answer = input(
+            "Replace existing output artifacts?\n"
+            f"{details}{metadata_warning}\n"
+            "Only the QCOW2, its checksum, and build-info.json may be replaced. [y/N] "
+        ).strip().lower()
         if answer not in {"y", "yes"}:
             raise SystemExit("cancelled")
 

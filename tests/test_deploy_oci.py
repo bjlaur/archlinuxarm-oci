@@ -527,6 +527,15 @@ class ReleaseTests(unittest.TestCase):
             with self.assertRaisesRegex(deploy.DeploymentError, "unsafe"):
                 deploy.parse_release(directory)
 
+    def test_parse_release_rejects_non_string_checksum_cleanly(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            (directory / "build-info.json").write_text(
+                json.dumps({"image_filename": "image.qcow2", "image_sha256": 123})
+            )
+            with self.assertRaisesRegex(deploy.DeploymentError, "invalid image SHA-256"):
+                deploy.parse_release(directory)
+
 
 class BucketMutationTests(unittest.TestCase):
     def test_auto_selected_existing_bucket_is_reused(self):
@@ -1058,15 +1067,26 @@ class ObjectSafetyTests(unittest.TestCase):
 
 
 class CleanDeploymentTests(unittest.TestCase):
+    DEPLOYMENT_ID = "11111111-2222-4333-8444-555555555555"
+    IMAGE_SHA256 = "a" * 64
+
+    @classmethod
+    def deployment_tags(cls):
+        return {
+            "archlinuxarm-oci-deployment": cls.DEPLOYMENT_ID,
+            "archlinuxarm-oci-sha256": cls.IMAGE_SHA256,
+        }
+
     def write_state(self, path):
         path.write_text(
             json.dumps(
                 {
                     "schema_version": deploy.STATE_SCHEMA_VERSION,
-                    "deployment_id": str(deploy.uuid.uuid4()),
+                    "deployment_id": self.DEPLOYMENT_ID,
                     "created_at": "2026-01-01T00:00:00Z",
                     "updated_at": "2026-01-01T00:00:00Z",
                     "phase": "failed",
+                    "release": {"sha256": self.IMAGE_SHA256},
                     "resources": {
                         "bucket": {
                             "namespace": "ns",
@@ -1107,12 +1127,32 @@ class CleanDeploymentTests(unittest.TestCase):
             )
             oci = SequenceOCI(
                 [
-                    {"data": {"lifecycle-state": "RUNNING"}},
+                    {
+                        "data": {
+                            "lifecycle-state": "RUNNING",
+                            "freeform-tags": self.deployment_tags(),
+                        }
+                    },
                     {},
-                    {"data": {"lifecycle-state": "TERMINATED"}},
-                    {"data": {"lifecycle-state": "AVAILABLE"}},
+                    {
+                        "data": {
+                            "lifecycle-state": "TERMINATED",
+                            "freeform-tags": self.deployment_tags(),
+                        }
+                    },
+                    {
+                        "data": {
+                            "lifecycle-state": "AVAILABLE",
+                            "freeform-tags": self.deployment_tags(),
+                        }
+                    },
                     {},
-                    {"data": {"lifecycle-state": "DELETED"}},
+                    {
+                        "data": {
+                            "lifecycle-state": "DELETED",
+                            "freeform-tags": self.deployment_tags(),
+                        }
+                    },
                     {"content-length": "1"},
                     {},
                     deploy.OCIError([], 1, "ServiceError: 404 NotAuthorizedOrNotFound"),
@@ -1153,6 +1193,83 @@ class CleanDeploymentTests(unittest.TestCase):
         self.assertEqual(commands[12][:3], ["os", "preauth-request", "list"])
         self.assertEqual(commands[13][:3], ["os", "preauth-request", "delete"])
         self.assertEqual(commands[15][:3], ["os", "bucket", "delete"])
+
+    def test_clean_deployment_refuses_mismatched_live_compute_tags(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            state_path = Path(temporary) / "state.json"
+            self.write_state(state_path)
+            args = mock.Mock(
+                state_file=state_path,
+                profile="DEFAULT",
+                config_file=None,
+                region=None,
+                verbose=False,
+                instance_timeout=30,
+                image_timeout=30,
+            )
+            oci = SequenceOCI(
+                [
+                    {
+                        "data": {
+                            "lifecycle-state": "RUNNING",
+                            "freeform-tags": {
+                                "archlinuxarm-oci-deployment": "different",
+                                "archlinuxarm-oci-sha256": self.IMAGE_SHA256,
+                            },
+                        }
+                    }
+                ]
+            )
+            with (
+                mock.patch.object(deploy.shutil, "which", return_value="/usr/bin/oci"),
+                mock.patch.object(deploy, "OCIRunner", return_value=oci),
+                self.assertRaisesRegex(
+                    deploy.DeploymentError, "live deployment tags do not match state"
+                ),
+            ):
+                deploy.clean_deployment(args)
+            self.assertTrue(state_path.exists())
+        self.assertEqual(len(oci.calls), 1)
+
+    def test_clean_deployment_refuses_mismatched_live_image_tags(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            state_path = Path(temporary) / "state.json"
+            self.write_state(state_path)
+            document = json.loads(state_path.read_text())
+            document["resources"]["instance"]["deleted"] = True
+            state_path.write_text(json.dumps(document))
+            args = mock.Mock(
+                state_file=state_path,
+                profile="DEFAULT",
+                config_file=None,
+                region=None,
+                verbose=False,
+                instance_timeout=30,
+                image_timeout=30,
+            )
+            oci = SequenceOCI(
+                [
+                    {
+                        "data": {
+                            "lifecycle-state": "AVAILABLE",
+                            "freeform-tags": {
+                                "archlinuxarm-oci-deployment": self.DEPLOYMENT_ID,
+                                "archlinuxarm-oci-sha256": "b" * 64,
+                            },
+                        }
+                    }
+                ]
+            )
+            with (
+                mock.patch.object(deploy.shutil, "which", return_value="/usr/bin/oci"),
+                mock.patch.object(deploy, "OCIRunner", return_value=oci),
+                self.assertRaisesRegex(
+                    deploy.DeploymentError, "live deployment tags do not match state"
+                ),
+            ):
+                deploy.clean_deployment(args)
+            self.assertTrue(state_path.exists())
+        self.assertEqual(len(oci.calls), 1)
 
     def test_clean_deployment_resumes_after_object_was_already_deleted(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -1218,6 +1335,105 @@ class CleanDeploymentTests(unittest.TestCase):
         self.assertEqual(commands[2][:3], ["os", "preauth-request", "list"])
         self.assertEqual(commands[3][:3], ["os", "preauth-request", "delete"])
         self.assertEqual(commands[5][:3], ["os", "bucket", "delete"])
+
+    def test_clean_deployment_keeps_reused_object_and_bucket(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            state_path = Path(temporary) / "state.json"
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": deploy.STATE_SCHEMA_VERSION,
+                        "deployment_id": str(deploy.uuid.uuid4()),
+                        "created_at": "2026-01-01T00:00:00Z",
+                        "updated_at": "2026-01-01T00:00:00Z",
+                        "phase": "failed",
+                        "resources": {
+                            "instance": {
+                                "id": "ocid1.instance.oc1.us-test-1.shared",
+                                "created": False,
+                            },
+                            "image": {
+                                "id": "ocid1.image.oc1.us-test-1.shared",
+                                "created": False,
+                            },
+                            "bucket": {
+                                "namespace": "ns",
+                                "name": "shared-bucket",
+                                "created": False,
+                            },
+                            "object": {
+                                "namespace": "ns",
+                                "bucket": "shared-bucket",
+                                "name": "existing.qcow2",
+                                "uploaded": False,
+                            },
+                        },
+                    }
+                )
+            )
+            args = mock.Mock(
+                state_file=state_path,
+                profile=None,
+                config_file=None,
+                region=None,
+                verbose=False,
+                instance_timeout=30,
+                image_timeout=30,
+            )
+            oci = SequenceOCI([])
+            with (
+                mock.patch.object(deploy.shutil, "which", return_value="/usr/bin/oci"),
+                mock.patch.object(deploy, "OCIRunner", return_value=oci),
+            ):
+                self.assertEqual(deploy.clean_deployment(args), 0)
+            self.assertFalse(state_path.exists())
+        self.assertEqual(oci.calls, [])
+
+    def test_clean_deployment_reuses_recorded_oci_context(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            state_path = Path(temporary) / "state.json"
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": deploy.STATE_SCHEMA_VERSION,
+                        "deployment_id": str(deploy.uuid.uuid4()),
+                        "created_at": "2026-01-01T00:00:00Z",
+                        "updated_at": "2026-01-01T00:00:00Z",
+                        "phase": "failed",
+                        "profile": "OCI-PROFILE",
+                        "region": "us-test-1",
+                        "inputs": {
+                            "profile": "OCI-PROFILE",
+                            "region": "us-test-1",
+                            "config_file": "/tmp/oci-config",
+                        },
+                        "resources": {
+                            "bucket": {
+                                "namespace": "ns",
+                                "name": "shared-bucket",
+                                "created": False,
+                            }
+                        },
+                    }
+                )
+            )
+            args = mock.Mock(
+                state_file=state_path,
+                profile=None,
+                config_file=None,
+                region=None,
+                verbose=False,
+                instance_timeout=30,
+                image_timeout=30,
+            )
+            with (
+                mock.patch.object(deploy.shutil, "which", return_value="/usr/bin/oci"),
+                mock.patch.object(deploy, "OCIRunner") as runner,
+            ):
+                self.assertEqual(deploy.clean_deployment(args), 0)
+            runner.assert_called_once_with(
+                "OCI-PROFILE", Path("/tmp/oci-config"), "us-test-1", False
+            )
 
 
 class MutationCommandTests(unittest.TestCase):

@@ -303,15 +303,18 @@ def parse_release(directory):
     try:
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
         filename = metadata["image_filename"]
-        expected = metadata["image_sha256"].lower()
+        expected = metadata["image_sha256"]
     except (OSError, KeyError, TypeError, json.JSONDecodeError) as error:
         raise DeploymentError("downloaded build-info.json is invalid") from error
     if not isinstance(filename, str) or Path(filename).name != filename:
         raise DeploymentError("build-info.json contains an unsafe image filename")
     if not re.fullmatch(r"[A-Za-z0-9._-]+\.qcow2", filename):
         raise DeploymentError("build-info.json contains an invalid image filename")
-    if not isinstance(expected, str) or not re.fullmatch(r"[0-9a-f]{64}", expected):
+    if not isinstance(expected, str) or not re.fullmatch(
+        r"[0-9a-fA-F]{64}", expected
+    ):
         raise DeploymentError("build-info.json contains an invalid image SHA-256")
+    expected = expected.lower()
     image = directory / filename
     checksum_path = directory / f"{filename}.sha256"
     try:
@@ -785,6 +788,22 @@ def tags_match(resource, tags):
     return isinstance(actual, dict) and all(
         actual.get(key) == value for key, value in tags.items()
     )
+
+
+def require_cleanup_ownership(state, resource, description):
+    release = state.data.get("release")
+    image_sha256 = release.get("sha256") if isinstance(release, dict) else None
+    if not isinstance(image_sha256, str) or not re.fullmatch(
+        r"[0-9a-f]{64}", image_sha256
+    ):
+        raise DeploymentError(
+            f"refusing to delete {description}: state lacks a valid release SHA-256"
+        )
+    expected = deployment_tags(state, image_sha256)
+    if not tags_match(resource, expected):
+        raise DeploymentError(
+            f"refusing to delete {description}: live deployment tags do not match state"
+        )
 
 
 def exactly_one_tagged(resources, tags, description):
@@ -1817,6 +1836,9 @@ def clean_instance(args, oci, state, resources):
     instance = resources.get("instance")
     if not isinstance(instance, dict) or instance.get("deleted"):
         return
+    if instance.get("created") is not True:
+        print_status("CLEAN", "Keeping instance not created by this deployment")
+        return
     instance_id = instance.get("id")
     if not isinstance(instance_id, str):
         return
@@ -1832,6 +1854,7 @@ def clean_instance(args, oci, state, resources):
         print_status("CLEAN", f"Instance already terminated: {instance_id}")
         state.resource("instance", deleted=True, lifecycle_state="TERMINATED")
         return
+    require_cleanup_ownership(state, current, f"instance {instance_id}")
     print_status("CLEAN", f"Terminating instance {instance_id}")
     oci.run(
         [
@@ -1860,6 +1883,9 @@ def clean_image(args, oci, state, resources):
     image = resources.get("image")
     if not isinstance(image, dict) or image.get("deleted"):
         return
+    if image.get("created") is not True:
+        print_status("CLEAN", "Keeping custom image not created by this deployment")
+        return
     image_id = image.get("id")
     if not isinstance(image_id, str):
         return
@@ -1875,6 +1901,7 @@ def clean_image(args, oci, state, resources):
         print_status("CLEAN", f"Image already deleted: {image_id}")
         state.resource("image", deleted=True, lifecycle_state="DELETED")
         return
+    require_cleanup_ownership(state, current, f"custom image {image_id}")
     print_status("CLEAN", f"Deleting custom image {image_id}")
     oci.run(
         ["compute", "image", "delete", "--image-id", image_id, "--force"],
@@ -1892,6 +1919,9 @@ def clean_image(args, oci, state, resources):
 def clean_object(oci, state, resources, namespace, bucket):
     obj = resources.get("object")
     if not isinstance(obj, dict) or obj.get("deleted"):
+        return
+    if obj.get("uploaded") is not True:
+        print_status("CLEAN", "Keeping object not uploaded by this deployment")
         return
     name = obj.get("name")
     if not isinstance(name, str):
@@ -1924,6 +1954,9 @@ def clean_object(oci, state, resources, namespace, bucket):
 def clean_bucket(oci, state, resources, namespace):
     bucket = resources.get("bucket")
     if not isinstance(bucket, dict) or bucket.get("deleted"):
+        return
+    if bucket.get("created") is not True:
+        print_status("CLEAN", "Keeping bucket not created by this deployment")
         return
     name = bucket.get("name")
     if not isinstance(name, str):
@@ -1964,6 +1997,14 @@ def clean_deployment(args):
         raise DeploymentError("required program not found: oci")
     state = StateFile(args.state_file, resume=True)
     install_signal_handlers(state)
+    inputs = state.data.get("inputs")
+    inputs = inputs if isinstance(inputs, dict) else {}
+    if args.profile is None:
+        args.profile = state.data.get("profile") or inputs.get("profile") or "DEFAULT"
+    if args.config_file is None and isinstance(inputs.get("config_file"), str):
+        args.config_file = Path(inputs["config_file"]).expanduser().resolve()
+    if args.region is None:
+        args.region = state.data.get("region") or inputs.get("region")
     oci = OCIRunner(args.profile, args.config_file, args.region, args.verbose)
     resources = state.data.get("resources", {})
     if not isinstance(resources, dict):
@@ -2060,7 +2101,7 @@ def parse_args(argv=None):
         "--object-compartment-id",
         type=lambda value: validate_ocid(value, "object compartment"),
     )
-    parser.add_argument("--profile", default="DEFAULT")
+    parser.add_argument("--profile")
     parser.add_argument("--config-file", type=lambda v: Path(v).expanduser().resolve())
     parser.add_argument("--region")
     parser.add_argument("--shape", default=DEFAULT_SHAPE, choices=[DEFAULT_SHAPE])
@@ -2198,6 +2239,7 @@ def install_signal_handlers(state):
 
 def deploy(args):
     validate_state_file_selection(args)
+    args.profile = args.profile or "DEFAULT"
     apply_resume_defaults(args)
     validate_local_tools()
     oci = OCIRunner(args.profile, args.config_file, args.region, args.verbose)

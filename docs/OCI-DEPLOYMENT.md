@@ -202,8 +202,14 @@ multipart uploads, and deletes active pre-authenticated requests before deleting
 a bucket created by the deployment. It deletes the bucket only if it is empty,
 then removes `.deploy-oci-state.json` after successful cleanup. Cleanup is
 restartable: after interruption or an OCI error, rerun the same `--clean`
-command with the same state file. It does not discover or delete unrelated OCI
-resources.
+command with the same state file. Cleanup recovers the OCI profile, config-file
+path, and region from state when those options are omitted. Ownership flags are
+enforced: reused instances, images, objects, and buckets are retained. It does
+not discover or delete unrelated OCI resources. Before terminating a live
+instance or deleting a live custom image, cleanup fetches it from OCI and
+requires its deployment UUID and release SHA-256 tags to match the state file.
+A missing or mismatched tag stops cleanup without issuing the destructive
+command.
 
 The first Ctrl-C requests a graceful stop. The deployer lets the active OCI CLI
 command finish, saves its returned resource state, and exits at the next safe
