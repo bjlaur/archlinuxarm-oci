@@ -50,9 +50,6 @@ def factory_inspection(*, shadow: str = "root:!:1::::::\nalarm:$6$usable:1::::::
             "/etc/cloud/cloud.cfg.d/90-oci-alarm.cfg": (
                 build.PROJECT / "templates/cloud-init-alarm.cfg"
             ).read_text(),
-            "/etc/sudoers.d/20-alarm-cloud": (
-                build.PROJECT / "templates/sudoers-alarm"
-            ).read_text(),
         },
         paths={path: path in required for path in all_paths},
         sizes={"/etc/machine-id": 0},
@@ -507,10 +504,8 @@ class ArchiveTests(unittest.TestCase):
                 assert cloud_cfg is not None
                 text = cloud_cfg.read().decode()
             self.assertIn("name: alarm", text)
-            self.assertIn(
-                "usr/local/lib/archlinuxarm-oci-builder/final-root/etc/sudoers.d/20-alarm-cloud",
-                names,
-            )
+            self.assertIn("sudo: ALL=(ALL) NOPASSWD:ALL", text)
+            self.assertFalse(any("20-alarm-cloud" in name for name in names))
             self.assertFalse(any("authorized_keys" in name for name in names))
 
     def test_factory_nocloud_seed_contains_public_data_only(self):
@@ -555,7 +550,6 @@ class ArchiveTests(unittest.TestCase):
             expected.files["/etc/ssh/sshd_config.d/10-oci-security.conf"],
             expected.files["/etc/shadow"],
             expected.files["/etc/cloud/cloud.cfg.d/90-oci-alarm.cfg"],
-            expected.files["/etc/sudoers.d/20-alarm-cloud"],
             *(["true"] * 6),
             *(["false"] * 6),
             "0",
@@ -563,7 +557,7 @@ class ArchiveTests(unittest.TestCase):
             "/var/lib/cloud/instances/*",
         ]
         keys = [
-            "root_uuid", *[f"file.{index}" for index in range(5)],
+            "root_uuid", *[f"file.{index}" for index in range(4)],
             *[f"path.{index}" for index in range(12)], "size.0", "glob.0", "glob.1",
         ]
         token = "OCIINSPECTdeadbeef"
@@ -729,6 +723,10 @@ class RepositoryTests(unittest.TestCase):
         self.assertIn("availability domains", deployment)
         self.assertIn("OCI-PREPARATION.md", readme)
         self.assertIn("OCI-DEPLOYMENT.md", readme)
+        self.assertIn(
+            "python3 -m py_compile build.py deploy-oci.py download-latest.py",
+            readme,
+        )
 
     def test_release_workflow_smokes_the_uploaded_artifact_before_publish(self):
         workflow = self.release_workflow()
@@ -825,6 +823,11 @@ class RepositoryTests(unittest.TestCase):
         smoke_test = (build.PROJECT / "guest" / "uefi-smoke-test.sh").read_text()
         self.assertNotIn("nft -c -f /etc/nftables.conf", entrypoint)
         self.assertIn("nft -c -f /etc/nftables.conf", smoke_test)
+
+    def test_grow_root_validates_partition_number(self):
+        grow_root = (build.PROJECT / "overlay/usr/local/sbin/oci-grow-root").read_text()
+        self.assertIn("lsblk -nro PARTN", grow_root)
+        self.assertIn('"$partnum" =~ ^[0-9]+$', grow_root)
 
     def test_guest_installs_required_packages_without_full_upgrade(self):
         configure = (build.PROJECT / "guest" / "configure.sh").read_text()

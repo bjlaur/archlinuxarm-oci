@@ -675,13 +675,6 @@ def resolve_bucket_cleanup(args, input_fn=None):
         args.cleanup_bucket = True
 
 
-def find_shape(shapes, name):
-    for shape in shapes:
-        if isinstance(shape, dict) and shape.get("shape") == name:
-            return shape
-    raise DeploymentError(f"shape {name} is not offered in the selected availability domain")
-
-
 def validate_shape_config(shape, ocpus, memory_gbs):
     if not shape.get("is-flexible"):
         raise DeploymentError(f"shape {shape.get('shape')} is not flexible")

@@ -238,7 +238,7 @@ explicit `--accel tcg` also forces its appliance to use TCG.
 
 ```bash
 python3 -m unittest discover -s tests -v
-python3 -m py_compile build.py download-latest.py
+python3 -m py_compile build.py deploy-oci.py download-latest.py
 bash -n ci/*.sh guest/*.sh install-deps.sh
 ./build.py --check
 ```

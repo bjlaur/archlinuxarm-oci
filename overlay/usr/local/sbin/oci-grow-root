@@ -2,10 +2,10 @@
 set -euo pipefail
 
 rootdev="$(findmnt -n -o SOURCE /)"
-partnum="$(lsblk -n -o PARTN "$rootdev")"
-parent="$(lsblk -n -o PKNAME "$rootdev")"
+partnum="$(lsblk -nro PARTN "$rootdev")"
+parent="$(lsblk -nro PKNAME "$rootdev")"
 
-[[ -b "/dev/$parent" && -n "$partnum" ]]
+[[ -b "/dev/$parent" && "$partnum" =~ ^[0-9]+$ ]]
 if growpart "/dev/$parent" "$partnum"; then
     :
 else

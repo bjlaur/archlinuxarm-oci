@@ -803,9 +803,6 @@ class Builder:
                 "etc/cloud/cloud.cfg.d/90-oci-alarm.cfg": (
                     PROJECT / "templates/cloud-init-alarm.cfg"
                 ).read_text(),
-                "etc/sudoers.d/20-alarm-cloud": (
-                    PROJECT / "templates/sudoers-alarm"
-                ).read_text(),
             })
         for relative, text in final_generated.items():
             path = final_root / relative
@@ -912,7 +909,6 @@ class Builder:
             files.extend([
                 "/etc/shadow",
                 "/etc/cloud/cloud.cfg.d/90-oci-alarm.cfg",
-                "/etc/sudoers.d/20-alarm-cloud",
             ])
             paths.extend([
                 "/usr/bin/cloud-init",
@@ -1034,9 +1030,8 @@ class Builder:
             cloud_cfg = inspection.files["/etc/cloud/cloud.cfg.d/90-oci-alarm.cfg"]
             if "name: alarm" not in cloud_cfg or "lock_passwd: false" not in cloud_cfg:
                 raise RuntimeError("factory image is missing the alarm cloud-init override")
-            sudoers = inspection.files["/etc/sudoers.d/20-alarm-cloud"]
-            if "alarm ALL=(ALL:ALL) NOPASSWD: ALL" not in sudoers:
-                raise RuntimeError("factory image is missing passwordless alarm sudo")
+            if "sudo: ALL=(ALL) NOPASSWD:ALL" not in cloud_cfg:
+                raise RuntimeError("factory image is missing passwordless alarm sudo policy")
             required_paths = (
                 "/usr/bin/cloud-init",
                 "/usr/lib/systemd/system-generators/cloud-init-generator",
