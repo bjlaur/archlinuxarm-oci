@@ -24,3 +24,13 @@ systemctl enable \
     sshguard.service \
     serial-getty@ttyAMA0.service \
     oci-grow-root.service
+
+for unit in \
+    cloud-init-local.service \
+    cloud-init-main.service \
+    cloud-config.service \
+    cloud-final.service; do
+    if systemctl list-unit-files "$unit" >/dev/null 2>&1; then
+        systemctl enable "$unit"
+    fi
+done

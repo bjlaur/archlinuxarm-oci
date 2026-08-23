@@ -799,6 +799,22 @@ class RepositoryTests(unittest.TestCase):
         self.assertIn("cloud-init status --long", smoke_script)
         self.assertNotIn("cloud-init status --wait", smoke_script)
 
+    def test_factory_smoke_checks_cloud_init_is_enabled(self):
+        smoke_script = (build.PROJECT / "guest/uefi-smoke-test.sh").read_text()
+        self.assertIn("cloud-init-local.service", smoke_script)
+        self.assertIn("cloud-init-main.service", smoke_script)
+        self.assertIn("cloud-final.service", smoke_script)
+        self.assertIn('systemctl is-enabled "$unit"', smoke_script)
+
+    def test_final_image_enables_cloud_init_when_installed(self):
+        finalize = (build.PROJECT / "guest/finalize.sh").read_text()
+        self.assertIn("cloud-init-local.service", finalize)
+        self.assertIn("cloud-init-main.service", finalize)
+        self.assertIn("cloud-config.service", finalize)
+        self.assertIn("cloud-final.service", finalize)
+        self.assertIn('systemctl list-unit-files "$unit"', finalize)
+        self.assertIn('systemctl enable "$unit"', finalize)
+
     def test_bootstrap_payload_checks_pci_virtio_disk_serial(self):
         entrypoint = (build.PROJECT / "guest" / "build-entrypoint.sh").read_text()
         self.assertIn("/sys/block/vda/serial", entrypoint)

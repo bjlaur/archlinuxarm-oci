@@ -35,6 +35,9 @@ else
     ! getent passwd arch >/dev/null
     [[ "$(passwd -S root | awk '{print $2}')" == L ]]
     [[ "$(passwd -S alarm | awk '{print $2}')" != L ]]
+    for unit in cloud-init-local.service cloud-init-main.service cloud-final.service; do
+        systemctl is-enabled "$unit" >/dev/null
+    done
     # cloud-final.service has already completed because the smoke unit Requires
     # and orders itself after it. Do not use --wait here: cloud-init's status
     # waiter can block when this service is the explicitly selected boot target.
