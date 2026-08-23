@@ -196,6 +196,12 @@ When the upstream checksum changes, the checker dispatches `release.yml`. A
 maintainer can also manually force a rebuild for project-code changes. A push
 alone does not replace a release when the upstream rootfs is unchanged.
 
+For a deliberate replacement, manually dispatch `release.yml` with
+`replace_release=true`. Replacement implies a forced build. The workflow keeps
+the current release available while the new image builds and passes its UEFI
+smoke test, publishes the replacement, and only then deletes the previously
+current release and its tag. Do not manually delete the current release first.
+
 The release pipeline:
 
 1. decides whether a build is needed;

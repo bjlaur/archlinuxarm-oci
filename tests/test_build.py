@@ -896,6 +896,21 @@ class RepositoryTests(unittest.TestCase):
         self.assertIn('"$PUBLISH_RELEASE" == true', workflow)
         self.assertIn("if: inputs.publish_release", workflow)
 
+    def test_release_workflow_replaces_only_after_successful_publish(self):
+        workflow = self.release_workflow()
+        self.assertIn("replace_release:", workflow)
+        self.assertIn("REPLACE_RELEASE: ${{ inputs.replace_release }}", workflow)
+        self.assertIn("reason=manual-replace", workflow)
+        self.assertIn(
+            "previous_release_tag: ${{ steps.decision.outputs.previous_release_tag }}",
+            workflow,
+        )
+        self.assertIn('gh release delete "$PREVIOUS_TAG" --cleanup-tag --yes', workflow)
+        self.assertLess(
+            workflow.index("Publish GitHub Release"),
+            workflow.index("Remove previous GitHub Release"),
+        )
+
     def test_ci_libguestfs_setup_only_copies_the_hosted_runner_kernel(self):
         helper = (build.PROJECT / "ci/prepare-libguestfs.sh").read_text()
         self.assertIn("SUPERMIN_KERNEL_VERSION", helper)

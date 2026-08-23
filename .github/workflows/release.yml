@@ -17,6 +17,11 @@ on:
         required: false
         type: boolean
         default: true
+      replace_release:
+        description: Force a build and remove the previous release only after the replacement publishes
+        required: false
+        type: boolean
+        default: false
       smoke_source_run_id:
         description: Smoke-test the factory image artifact from this prior run ID instead of building
         required: false
@@ -39,6 +44,7 @@ jobs:
       reason: ${{ steps.decision.outputs.reason }}
       rootfs_url: ${{ steps.decision.outputs.rootfs_url }}
       upstream_md5: ${{ steps.decision.outputs.upstream_md5 }}
+      previous_release_tag: ${{ steps.decision.outputs.previous_release_tag }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
@@ -48,12 +54,17 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           FORCE_REBUILD: ${{ inputs.force_rebuild }}
           PUBLISH_RELEASE: ${{ inputs.publish_release }}
+          REPLACE_RELEASE: ${{ inputs.replace_release }}
         shell: bash
         run: |
           set -euo pipefail
           if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch && "$GITHUB_REF" != refs/heads/main && \
                 "$PUBLISH_RELEASE" == true ]]; then
             echo "Branch workflow runs must disable release publishing." >&2
+            exit 1
+          fi
+          if [[ "$REPLACE_RELEASE" == true && "$PUBLISH_RELEASE" != true ]]; then
+            echo "Release replacement requires release publishing." >&2
             exit 1
           fi
 
@@ -93,7 +104,10 @@ jobs:
 
           should_build=false
           reason=already-released
-          if [[ "$FORCE_REBUILD" == true ]]; then
+          if [[ "$REPLACE_RELEASE" == true ]]; then
+            should_build=true
+            reason=manual-replace
+          elif [[ "$FORCE_REBUILD" == true ]]; then
             should_build=true
             reason=manual-force
           elif [[ -z "$latest_md5" ]]; then
@@ -108,6 +122,7 @@ jobs:
           echo "reason=$reason" >> "$GITHUB_OUTPUT"
           echo "rootfs_url=$rootfs_url" >> "$GITHUB_OUTPUT"
           echo "upstream_md5=$checksum" >> "$GITHUB_OUTPUT"
+          echo "previous_release_tag=$latest_tag" >> "$GITHUB_OUTPUT"
           echo "Decision: should_build=$should_build reason=$reason"
 
   build:
@@ -142,13 +157,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           UPSTREAM_MD5: ${{ needs.decide.outputs.upstream_md5 }}
           FORCE_REBUILD: ${{ inputs.force_rebuild }}
+          REPLACE_RELEASE: ${{ inputs.replace_release }}
         run: |
           set -euo pipefail
           build_date="$(date -u +%Y.%m.%d)"
           short_sha="${GITHUB_SHA:0:7}"
           md5_prefix="${UPSTREAM_MD5:0:8}"
           tag="${build_date}-${short_sha}-${md5_prefix}"
-          if [[ "$FORCE_REBUILD" == true ]] && gh release view "$tag" >/dev/null 2>&1; then
+          if [[ ( "$FORCE_REBUILD" == true || "$REPLACE_RELEASE" == true ) ]] && \
+               gh release view "$tag" >/dev/null 2>&1; then
             tag="${tag}-run${GITHUB_RUN_ID}"
           fi
           work_dir="/tmp/archlinuxarm-oci-work"
@@ -349,6 +366,16 @@ jobs:
             "$release_dir/build-info.json" \
             --title "Arch Linux ARM OCI Image — ${{ needs.build.outputs.build_date }}" \
             --notes-file "$release_dir/release-notes.md"
+
+      - name: Remove previous GitHub Release
+        if: >-
+          inputs.replace_release &&
+          needs.decide.outputs.previous_release_tag != '' &&
+          needs.decide.outputs.previous_release_tag != needs.build.outputs.tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PREVIOUS_TAG: ${{ needs.decide.outputs.previous_release_tag }}
+        run: gh release delete "$PREVIOUS_TAG" --cleanup-tag --yes
 
   smoke-existing:
     if: github.event_name == 'workflow_dispatch' && inputs.smoke_source_run_id != ''
