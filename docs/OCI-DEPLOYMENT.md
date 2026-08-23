@@ -19,7 +19,7 @@ The deployment tool performs these operations:
 7. adds `VM.Standard.A1.Flex` image compatibility;
 8. launches the instance and waits for `RUNNING`;
 9. reports its IP addresses and optionally verifies the guest over SSH; and
-10. optionally removes the temporary Object Storage object.
+10. optionally removes the temporary Object Storage object and import bucket.
 
 No OCI resource is created during `--dry-run`. The real deployment records
 every mutation in a private state file so it can be resumed safely.
@@ -91,7 +91,7 @@ revalidate and reuse the QCOW2 that dry-run already downloaded:
   --assign-public-ip \
   --reuse-download \
   --verify-ssh \
-  --cleanup-object
+  --cleanup-bucket
 ```
 
 The command can take time during the upload and custom-image import. It prints
@@ -117,9 +117,10 @@ OCI metadata, printed, or written to deployment state.
 
 `--cleanup-object` deletes the temporary QCOW2 object only after the custom
 image is `AVAILABLE` and the instance is `RUNNING`. `--cleanup-bucket` also
-deletes the selected bucket after a successful deployment, but only after the
-temporary object is deleted and the bucket is empty. Neither option deletes the
-custom image, instance, or boot volume.
+aborts pending multipart uploads and deletes the selected bucket after a
+successful deployment, but only after the temporary object is deleted and the
+bucket is empty. Neither option deletes the custom image, instance, or boot
+volume.
 
 ## 4. Confirm the result
 
@@ -172,8 +173,9 @@ Run the same real-deployment command with `--resume` appended:
 ```bash
 ./deploy-oci.py \
   --assign-public-ip \
+  --reuse-download \
   --verify-ssh \
-  --cleanup-object \
+  --cleanup-bucket \
   --resume
 ```
 
@@ -216,6 +218,132 @@ SHA-256 metadata match.
 An object reused from outside the deployment is never eligible for automatic
 cleanup. Bucket cleanup is opt-in, defaults to No when prompted, and refuses to
 delete a non-empty bucket.
+
+### Manual deployment without `deploy-oci.py`
+
+The automation is the supported path because it records state, validates the
+download, sets image capabilities, and resumes safely. If you need to deploy
+manually through the OCI Console or direct CLI commands, use the same settings
+the tool applies.
+
+Start from a verified release directory containing the `.qcow2`,
+`.qcow2.sha256`, and `build-info.json`:
+
+```bash
+sha256sum -c -- *.qcow2.sha256
+
+python3 -c '
+import json
+info = json.load(open("build-info.json"))
+print("{}  {}".format(info["image_sha256"], info["image_filename"]))
+' | sha256sum -c -
+```
+
+Create or choose a private Standard-tier Object Storage bucket in the same
+region as the target instance, then upload the QCOW2. Record the namespace,
+bucket, object name, compartment OCID, subnet OCID, and availability domain.
+
+In the Console, import a custom image from that Object Storage object:
+
+```text
+Image type:                QCOW2
+Operating system:          Linux
+Operating system version:  Arch Linux ARM
+Launch mode:               Paravirtualized
+Compartment:               target compute compartment
+```
+
+Wait for the image lifecycle state to become `Available`. Then edit the custom
+image capability schema so these defaults are selected:
+
+```text
+Compute.Firmware:          UEFI_64
+Compute.LaunchMode:        PARAVIRTUALIZED
+Network.AttachmentType:    PARAVIRTUALIZED
+Storage.BootVolumeType:    PARAVIRTUALIZED
+```
+
+Add `VM.Standard.A1.Flex` to the image's compatible shapes if OCI did not add
+it automatically.
+
+Launch an instance from the custom image:
+
+```text
+Shape:              VM.Standard.A1.Flex
+OCPUs:              1 or your selected A1 value
+Memory:             6 GB or a valid A1 value
+Boot volume:        at least 50 GB
+Image:              the imported custom image
+Subnet:             a subnet matching your public/private IP plan
+Public IP:          enabled for direct SSH, disabled for private-only access
+SSH keys:           your OpenSSH public key
+```
+
+OCI's normal SSH-key field is enough for the factory image. Cloud-init reads
+the key from instance metadata and installs it for the existing `alarm`
+account. If you use advanced cloud-init user data, preserve these outcomes:
+
+```text
+alarm keeps passwordless sudo
+root remains locked
+SSH password authentication remains disabled
+```
+
+After the instance reaches `Running`, connect as `alarm`:
+
+```bash
+ssh -i PATH_TO_PRIVATE_KEY alarm@INSTANCE_IP
+```
+
+Run the checks from [Confirm the result](#4-confirm-the-result). Once the
+custom image and instance are known good, delete the temporary QCOW2 object.
+If you created a dedicated import bucket, abort any unfinished multipart
+uploads and delete the bucket only after it is empty.
+
+Equivalent CLI skeleton:
+
+```bash
+oci os object put \
+  --namespace NAMESPACE \
+  --bucket-name BUCKET \
+  --name IMAGE.qcow2 \
+  --file IMAGE.qcow2 \
+  --content-type application/octet-stream \
+  --verify-checksum \
+  --no-overwrite
+
+oci compute image import from-object \
+  --namespace NAMESPACE \
+  --bucket-name BUCKET \
+  --name IMAGE.qcow2 \
+  --compartment-id COMPARTMENT_OCID \
+  --display-name Arch-Linux-ARM-OCI \
+  --source-image-type QCOW2 \
+  --operating-system Linux \
+  --operating-system-version "Arch Linux ARM" \
+  --launch-mode PARAVIRTUALIZED
+
+oci compute image-shape-compatibility-entry add \
+  --image-id IMAGE_OCID \
+  --shape-name VM.Standard.A1.Flex \
+  --force
+
+oci compute instance launch \
+  --availability-domain AVAILABILITY_DOMAIN \
+  --compartment-id COMPARTMENT_OCID \
+  --subnet-id SUBNET_OCID \
+  --image-id IMAGE_OCID \
+  --shape VM.Standard.A1.Flex \
+  --shape-config '{"ocpus":1,"memoryInGBs":6}' \
+  --boot-volume-size-in-gbs 50 \
+  --ssh-authorized-keys-file ~/.ssh/id_ed25519.pub \
+  --assign-public-ip true \
+  --display-name archlinuxarm-a1
+```
+
+When using CLI-only manual deployment, inspect and adjust the image capability
+schema before launch if the imported image does not already report the required
+UEFI and paravirtualized defaults.
 
 ### Public and private networking
 
@@ -313,9 +441,14 @@ until deliberately deleted. Review current OCI pricing and your Always Free
 eligibility; do not assume every selected resource is free.
 
 Before teardown, copy the exact OCIDs from `.deploy-oci-state.json` and inspect
-them. Terminating the instance and deleting the custom image are intentionally
-manual operations in the initial version so a failure cannot destroy evidence
-or the wrong resource.
+them. Ordinary deployment failures intentionally preserve the instance, custom
+image, and diagnostic evidence until you choose an explicit cleanup path.
+
+For an automated deployment that still has its state file, `./deploy-oci.py
+--clean` is the safest full cleanup path. For a manual deployment, terminate
+the instance with boot-volume deletion enabled, delete the custom image, delete
+the temporary object, abort unfinished multipart uploads, and delete the import
+bucket only after confirming it is empty.
 
 ### Oracle references
 

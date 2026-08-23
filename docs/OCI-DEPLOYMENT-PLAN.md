@@ -1,5 +1,10 @@
 # OCI deployment automation plan
 
+Status: implemented. This document is retained as the design record for
+`deploy-oci.py`. For current user instructions, use
+[`OCI-PREPARATION.md`](OCI-PREPARATION.md) and
+[`OCI-DEPLOYMENT.md`](OCI-DEPLOYMENT.md).
+
 ## Goal
 
 Add a supported, command-line deployment path from the latest published QCOW2
@@ -181,10 +186,9 @@ free-form tags.
   Storage.BootVolumeType = PARAVIRTUALIZED
   ```
 
+- Create or update the image-specific capability schema when needed, then
+  verify the required effective defaults.
 - Add `VM.Standard.A1.Flex` compatibility if it is absent, then verify it.
-- Do not create or modify an image-specific capability schema automatically in
-  the initial version. Fail with a precise corrective command if effective
-  capabilities conflict.
 
 ### 5. Launch and inspect the instance
 

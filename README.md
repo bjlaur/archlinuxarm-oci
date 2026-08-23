@@ -55,7 +55,7 @@ pinned signing fingerprint, image checksum, and build/smoke acceleration modes.
 ## Deploy on OCI
 
 For a manual deployment, upload the QCOW2 to OCI Object Storage and import it
-with:
+as a custom image with:
 
 ```text
 Image type:   QCOW2
@@ -71,6 +71,11 @@ instance boots, connect as:
 ```bash
 ssh alarm@INSTANCE_IP
 ```
+
+The full [OCI deployment guide](docs/OCI-DEPLOYMENT.md) includes a manual
+Console/CLI checklist for importing the image, setting capabilities, launching
+the instance, verifying first boot, and cleaning up temporary Object Storage
+resources.
 
 Alternatively, `deploy-oci.py` can automatically download and verify the latest
 image, import it, launch an A1 instance, and verify its first boot:
@@ -91,13 +96,13 @@ IAM and network preparation, run the read-only check and then deploy:
   --assign-public-ip \
   --reuse-download \
   --verify-ssh \
-  --cleanup-object
+  --cleanup-bucket
 ```
 
 See [Prepare OCI for deployment](docs/OCI-PREPARATION.md) for the one-time
 account, IAM, and network setup. See the full [OCI deployment
-guide](docs/OCI-DEPLOYMENT.md) for discovery behavior, overrides, resume,
-cleanup, and troubleshooting.
+guide](docs/OCI-DEPLOYMENT.md) for discovery behavior, overrides, manual
+deployment, resume, cleanup, and troubleshooting.
 
 The source disk is 4 GiB. `oci-grow-root.service` expands partition 2 and its
 ext4 filesystem when the instance uses a larger OCI boot volume.
