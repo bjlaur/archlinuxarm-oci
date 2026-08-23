@@ -925,7 +925,7 @@ def ensure_object(args, oci, state, namespace, bucket, image, image_sha256):
     name = image.name
     recorded = state.data.get("resources", {}).get("object", {})
     recorded_image = state.data.get("resources", {}).get("image", {})
-    if args.resume and recorded.get("deleted") and recorded_image.get("id"):
+    if args.resume and recorded.get("uploaded") and recorded_image.get("id"):
         return recorded.get("name", name)
     existing = head_object(oci, namespace, bucket, name)
     uploaded = False
@@ -1576,6 +1576,10 @@ def cleanup_object(args, oci, state, namespace, bucket, object_name):
     instance = state.data.get("resources", {}).get("instance", {})
     if image.get("lifecycle_state") != "AVAILABLE" or instance.get("lifecycle_state") != "RUNNING":
         raise DeploymentError("refusing object cleanup before image and instance are ready")
+    if head_object(oci, namespace, bucket, object_name) is None:
+        print_status("CLEANUP", f"Temporary object already absent: {bucket}/{object_name}")
+        state.resource("object", deleted=True)
+        return
     print_status("CLEANUP", f"Deleting temporary object {bucket}/{object_name}")
     oci.run(
         [
@@ -1591,7 +1595,8 @@ def cleanup_object(args, oci, state, namespace, bucket, object_name):
             "--force",
             "--opc-client-request-id",
             client_request_id(state, "delete-object"),
-        ]
+        ],
+        empty_data={},
     )
     if head_object(oci, namespace, bucket, object_name) is not None:
         raise DeploymentError("temporary object still exists after deletion")
@@ -1639,6 +1644,7 @@ def cleanup_bucket(args, oci, state, namespace, bucket):
         raise DeploymentError(
             "refusing bucket cleanup before image and instance are ready"
         )
+    abort_multipart_uploads(oci, namespace, bucket)
     objects = bucket_object_names(oci, namespace, bucket)
     if objects:
         raise DeploymentError(
@@ -1657,7 +1663,8 @@ def cleanup_bucket(args, oci, state, namespace, bucket):
             "--force",
             "--opc-client-request-id",
             client_request_id(state, "delete-bucket"),
-        ]
+        ],
+        empty_data={},
     )
     if get_bucket(oci, namespace, bucket) is not None:
         raise DeploymentError("bucket still exists after deletion")

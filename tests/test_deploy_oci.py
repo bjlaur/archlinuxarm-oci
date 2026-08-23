@@ -814,6 +814,31 @@ class ObjectSafetyTests(unittest.TestCase):
         self.assertEqual(metadata["archlinuxarm-oci-sha256"], digest)
         self.assertIn("--opc-client-request-id", upload)
 
+    def test_resume_skips_missing_object_after_image_import(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            image = Path(temporary) / "image.qcow2"
+            image.write_bytes(b"image")
+            digest = hashlib.sha256(b"image").hexdigest()
+            args = mock.Mock(reuse_object=False, resume=True)
+            state = FakeState(
+                {
+                    "resources": {
+                        "object": {
+                            "name": image.name,
+                            "uploaded": True,
+                            "sha256": digest,
+                        },
+                        "image": {"id": "ocid1.image.oc1..example"},
+                    }
+                }
+            )
+            oci = SequenceOCI([])
+            self.assertEqual(
+                deploy.ensure_object(args, oci, state, "ns", "bucket", image, digest),
+                image.name,
+            )
+        self.assertEqual(oci.calls, [])
+
     def test_bucket_cleanup_implies_uploaded_object_cleanup(self):
         args = mock.Mock(cleanup_object=False, cleanup_bucket=True)
         state = FakeState(
@@ -826,9 +851,29 @@ class ObjectSafetyTests(unittest.TestCase):
                 },
             }
         )
-        oci = SequenceOCI([None, None])
+        oci = SequenceOCI([{}, None, None])
         deploy.cleanup_object(args, oci, state, "ns", "bucket", "image")
-        self.assertEqual(oci.calls[0][0][:3], ["os", "object", "delete"])
+        self.assertEqual(oci.calls[1][0][:3], ["os", "object", "delete"])
+        self.assertEqual(oci.calls[1][1], {"empty_data": {}})
+        self.assertTrue(state.data["resources"]["object"]["deleted"])
+
+    def test_object_cleanup_marks_missing_object_deleted(self):
+        args = mock.Mock(cleanup_object=True)
+        state = FakeState(
+            {
+                "deployment_id": str(deploy.uuid.uuid4()),
+                "resources": {
+                    "object": {"uploaded": True},
+                    "image": {"lifecycle_state": "AVAILABLE"},
+                    "instance": {"lifecycle_state": "RUNNING"},
+                },
+            }
+        )
+        oci = SequenceOCI(
+            [deploy.OCIError([], 1, "ServiceError: 404 NotAuthorizedOrNotFound")]
+        )
+        deploy.cleanup_object(args, oci, state, "ns", "bucket", "image")
+        self.assertEqual(oci.calls[0][0][:3], ["os", "object", "head"])
         self.assertTrue(state.data["resources"]["object"]["deleted"])
 
     def test_bucket_cleanup_deletes_empty_bucket(self):
@@ -844,13 +889,15 @@ class ObjectSafetyTests(unittest.TestCase):
         )
         oci = SequenceOCI(
             [
+                {"data": []},
                 {"data": {"objects": []}},
                 {},
                 deploy.OCIError([], 1, "ServiceError: 404 NotAuthorizedOrNotFound"),
             ]
         )
         deploy.cleanup_bucket(args, oci, state, "ns", "bucket")
-        self.assertEqual(oci.calls[1][0][:3], ["os", "bucket", "delete"])
+        self.assertEqual(oci.calls[2][0][:3], ["os", "bucket", "delete"])
+        self.assertEqual(oci.calls[2][1], {"empty_data": {}})
         self.assertTrue(state.data["resources"]["bucket"]["deleted"])
 
     def test_bucket_cleanup_refuses_non_empty_bucket(self):
@@ -864,7 +911,9 @@ class ObjectSafetyTests(unittest.TestCase):
                 },
             }
         )
-        oci = SequenceOCI([{"data": {"objects": [{"name": "leftover"}]}}])
+        oci = SequenceOCI(
+            [{"data": []}, {"data": {"objects": [{"name": "leftover"}]}}]
+        )
         with self.assertRaisesRegex(deploy.DeploymentError, "non-empty bucket"):
             deploy.cleanup_bucket(args, oci, state, "ns", "bucket")
 
