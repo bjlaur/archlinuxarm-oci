@@ -1003,7 +1003,8 @@ def create_image(args, oci, state, namespace, bucket, object_name, tags):
                     "--compartment-id",
                     args.compartment_id,
                     "--all",
-                ]
+                ],
+                empty_data=[],
             ),
             list,
             "image list response",
@@ -1175,7 +1176,8 @@ def ensure_shape_compatibility(oci, image_id, shape, state=None):
                 "--image-id",
                 image_id,
                 "--all",
-            ]
+            ],
+            empty_data=[],
         ),
         list,
         "image shape compatibility response",
@@ -1212,7 +1214,8 @@ def ensure_shape_compatibility(oci, image_id, shape, state=None):
                     "--image-id",
                     image_id,
                     "--all",
-                ]
+                ],
+                empty_data=[],
             ),
             list,
             "image shape compatibility response",
@@ -1246,7 +1249,8 @@ def launch_instance(args, oci, state, image_id, tags):
                     "--compartment-id",
                     args.compartment_id,
                     "--all",
-                ]
+                ],
+                empty_data=[],
             ),
             list,
             "instance list response",
@@ -1435,7 +1439,8 @@ def bucket_object_names(oci, namespace, bucket):
                 "--bucket-name",
                 bucket,
                 "--all",
-            ]
+            ],
+            empty_data={"objects": []},
         ),
         dict,
         "object list response",

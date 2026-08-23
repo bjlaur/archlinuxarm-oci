@@ -583,6 +583,17 @@ class RunnerTests(unittest.TestCase):
                 {"data": []},
             )
 
+    def test_runner_can_treat_empty_stdout_as_empty_object_list(self):
+        completed = subprocess.CompletedProcess([], 0, "", "")
+        with mock.patch.object(deploy.subprocess, "run", return_value=completed):
+            self.assertEqual(
+                deploy.OCIRunner().run(
+                    ["os", "object", "list"],
+                    empty_data={"objects": []},
+                ),
+                {"data": {"objects": []}},
+            )
+
     def test_oci_error_recognizes_only_not_found_responses(self):
         missing = deploy.OCIError([], 1, "ServiceError: 404 NotAuthorizedOrNotFound")
         forbidden = deploy.OCIError([], 1, "ServiceError: 403 NotAllowed")
@@ -897,6 +908,37 @@ class MutationCommandTests(unittest.TestCase):
         self.assertEqual(command[command.index("--assign-public-ip") + 1], "false")
         self.assertNotIn("private", " ".join(str(part) for part in command))
         self.assertIn("--opc-client-request-id", command)
+
+    def test_resume_launches_when_empty_instance_list_has_empty_stdout(self):
+        args = mock.Mock(
+            resume=True,
+            instance_name="instance",
+            compartment_id=COMPARTMENT,
+            subnet_id=SUBNET,
+            availability_domain="test:AD-1",
+            shape=deploy.DEFAULT_SHAPE,
+            ocpus=1.0,
+            memory_gbs=6.0,
+            boot_volume_gbs=50,
+            ssh_public_key=Path("/keys/public.pub"),
+            assign_public_ip=False,
+            instance_timeout=30,
+        )
+        state = self.state()
+        oci = SequenceOCI(
+            [
+                {"data": []},
+                {"data": {"id": "instance-id", "lifecycle-state": "PROVISIONING"}},
+                {"data": {"id": "instance-id", "lifecycle-state": "RUNNING"}},
+            ]
+        )
+        instance_id, _ = deploy.launch_instance(
+            args, oci, state, "image-id", {"tag": "value"}
+        )
+        self.assertEqual(instance_id, "instance-id")
+        self.assertEqual(oci.calls[0][0][:3], ["compute", "instance", "list"])
+        self.assertEqual(oci.calls[0][1]["empty_data"], [])
+        self.assertEqual(oci.calls[1][0][:3], ["compute", "instance", "launch"])
 
 
 class DryRunTests(unittest.TestCase):
