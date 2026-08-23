@@ -905,6 +905,11 @@ class MutationCommandTests(unittest.TestCase):
             command[command.index("--ssh-authorized-keys-file") + 1],
             "/keys/public.pub",
         )
+        launch_options = json.loads(command[command.index("--launch-options") + 1])
+        self.assertEqual(launch_options["firmware"], "UEFI_64")
+        self.assertEqual(launch_options["networkType"], "PARAVIRTUALIZED")
+        self.assertEqual(launch_options["bootVolumeType"], "PARAVIRTUALIZED")
+        self.assertEqual(launch_options["remoteDataVolumeType"], "PARAVIRTUALIZED")
         self.assertEqual(command[command.index("--assign-public-ip") + 1], "false")
         self.assertNotIn("private", " ".join(str(part) for part in command))
         self.assertIn("--opc-client-request-id", command)
@@ -938,6 +943,42 @@ class MutationCommandTests(unittest.TestCase):
         self.assertEqual(instance_id, "instance-id")
         self.assertEqual(oci.calls[0][0][:3], ["compute", "instance", "list"])
         self.assertEqual(oci.calls[0][1]["empty_data"], [])
+        self.assertEqual(oci.calls[1][0][:3], ["compute", "instance", "launch"])
+
+    def test_resume_ignores_terminated_tagged_instances(self):
+        args = mock.Mock(
+            resume=True,
+            instance_name="instance",
+            compartment_id=COMPARTMENT,
+            subnet_id=SUBNET,
+            availability_domain="test:AD-1",
+            shape=deploy.DEFAULT_SHAPE,
+            ocpus=1.0,
+            memory_gbs=6.0,
+            boot_volume_gbs=50,
+            ssh_public_key=Path("/keys/public.pub"),
+            assign_public_ip=False,
+            instance_timeout=30,
+        )
+        tags = {"deployment": "one"}
+        state = self.state()
+        oci = SequenceOCI(
+            [
+                {
+                    "data": [
+                        {
+                            "id": "old-instance",
+                            "lifecycle-state": "TERMINATED",
+                            "freeform-tags": tags,
+                        }
+                    ]
+                },
+                {"data": {"id": "instance-id", "lifecycle-state": "PROVISIONING"}},
+                {"data": {"id": "instance-id", "lifecycle-state": "RUNNING"}},
+            ]
+        )
+        instance_id, _ = deploy.launch_instance(args, oci, state, "image-id", tags)
+        self.assertEqual(instance_id, "instance-id")
         self.assertEqual(oci.calls[1][0][:3], ["compute", "instance", "launch"])
 
 

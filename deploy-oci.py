@@ -30,6 +30,12 @@ REQUIRED_CAPABILITIES = {
     "Network.AttachmentType": "PARAVIRTUALIZED",
     "Storage.BootVolumeType": "PARAVIRTUALIZED",
 }
+REQUIRED_LAUNCH_OPTIONS = {
+    "firmware": "UEFI_64",
+    "networkType": "PARAVIRTUALIZED",
+    "bootVolumeType": "PARAVIRTUALIZED",
+    "remoteDataVolumeType": "PARAVIRTUALIZED",
+}
 ACTIVE_IMAGE_STATES = {"IMPORTING", "PROVISIONING"}
 ACTIVE_INSTANCE_STATES = {"PROVISIONING", "STARTING"}
 OCID_RE = re.compile(r"^ocid1\.[a-z0-9-]+\.oc[0-9]*\.[a-z0-9-]*\.[A-Za-z0-9._-]+$")
@@ -1236,6 +1242,12 @@ def get_instance(oci, instance_id):
     )
 
 
+def recoverable_instance(instance):
+    if not isinstance(instance, dict):
+        return False
+    return instance.get("lifecycle-state") not in ("TERMINATING", "TERMINATED")
+
+
 def launch_instance(args, oci, state, image_id, tags):
     recorded = state.data.get("resources", {}).get("instance", {})
     instance_id = recorded.get("id") if args.resume else None
@@ -1255,7 +1267,11 @@ def launch_instance(args, oci, state, image_id, tags):
             list,
             "instance list response",
         )
-        recovered = exactly_one_tagged(instances, tags, "instance")
+        recovered = exactly_one_tagged(
+            [instance for instance in instances if recoverable_instance(instance)],
+            tags,
+            "instance",
+        )
         if recovered is not None:
             instance_id = recovered.get("id")
             if not isinstance(instance_id, str):
@@ -1286,6 +1302,8 @@ def launch_instance(args, oci, state, image_id, tags):
                         {"ocpus": args.ocpus, "memoryInGBs": args.memory_gbs},
                         separators=(",", ":"),
                     ),
+                    "--launch-options",
+                    json.dumps(REQUIRED_LAUNCH_OPTIONS, separators=(",", ":")),
                     "--boot-volume-size-in-gbs",
                     str(args.boot_volume_gbs),
                     "--ssh-authorized-keys-file",
