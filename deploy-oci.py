@@ -38,6 +38,16 @@ REQUIRED_LAUNCH_OPTIONS = {
 }
 ACTIVE_IMAGE_STATES = {"IMPORTING", "PROVISIONING"}
 ACTIVE_INSTANCE_STATES = {"PROVISIONING", "STARTING"}
+DELETING_IMAGE_STATES = {"IMPORTING", "PROVISIONING", "AVAILABLE", "EXPORTING", "DISABLED"}
+DELETING_INSTANCE_STATES = {
+    "MOVING",
+    "PROVISIONING",
+    "RUNNING",
+    "STARTING",
+    "STOPPED",
+    "STOPPING",
+    "TERMINATING",
+}
 OCID_RE = re.compile(r"^ocid1\.[a-z0-9-]+\.oc[0-9]*\.[a-z0-9-]*\.[A-Za-z0-9._-]+$")
 
 
@@ -988,6 +998,14 @@ def wait_for_resource(getter, active_states, success_state, timeout, description
         delay = min(30, delay + 5)
 
 
+def wait_for_deleted(getter, active_states, timeout, description):
+    try:
+        wait_for_resource(getter, active_states, "DELETED", timeout, description)
+    except OCIError as error:
+        if not error.not_found:
+            raise
+
+
 def get_image(oci, image_id):
     return response_data(
         oci.run(["compute", "image", "get", "--image-id", image_id]),
@@ -1511,6 +1529,234 @@ def cleanup_bucket(args, oci, state, namespace, bucket):
     state.resource("bucket", deleted=True)
 
 
+def state_namespace(args, oci, resources):
+    bucket = resources.get("bucket") if isinstance(resources.get("bucket"), dict) else {}
+    obj = resources.get("object") if isinstance(resources.get("object"), dict) else {}
+    namespace = bucket.get("namespace") or obj.get("namespace")
+    if isinstance(namespace, str):
+        return namespace
+    return response_data(oci.run(["os", "ns", "get"]), str, "namespace response")
+
+
+def list_multipart_uploads(oci, namespace, bucket):
+    return response_data(
+        oci.run(
+            [
+                "os",
+                "multipart",
+                "list",
+                "--namespace",
+                namespace,
+                "--bucket-name",
+                bucket,
+                "--all",
+            ],
+            empty_data=[],
+        ),
+        list,
+        "multipart upload list response",
+    )
+
+
+def abort_multipart_uploads(oci, namespace, bucket):
+    for upload in list_multipart_uploads(oci, namespace, bucket):
+        if not isinstance(upload, dict):
+            raise DeploymentError("multipart upload list response has an invalid upload")
+        name = upload.get("object")
+        upload_id = upload.get("upload-id")
+        if not isinstance(name, str) or not isinstance(upload_id, str):
+            raise DeploymentError("multipart upload lacks an object name or upload ID")
+        print(f"CLEAN  Aborting multipart upload {bucket}/{name}")
+        oci.run(
+            [
+                "os",
+                "multipart",
+                "abort",
+                "--namespace",
+                namespace,
+                "--bucket-name",
+                bucket,
+                "--object-name",
+                name,
+                "--upload-id",
+                upload_id,
+                "--force",
+            ],
+            empty_data={},
+        )
+
+
+def clean_instance(args, oci, state, resources):
+    instance = resources.get("instance")
+    if not isinstance(instance, dict) or instance.get("deleted"):
+        return
+    instance_id = instance.get("id")
+    if not isinstance(instance_id, str):
+        return
+    try:
+        current = get_instance(oci, instance_id)
+    except OCIError as error:
+        if not error.not_found:
+            raise
+        print(f"CLEAN  Instance already absent: {instance_id}")
+        state.resource("instance", deleted=True)
+        return
+    if current.get("lifecycle-state") == "TERMINATED":
+        print(f"CLEAN  Instance already terminated: {instance_id}")
+        state.resource("instance", deleted=True, lifecycle_state="TERMINATED")
+        return
+    print(f"CLEAN  Terminating instance {instance_id}")
+    oci.run(
+        [
+            "compute",
+            "instance",
+            "terminate",
+            "--instance-id",
+            instance_id,
+            "--preserve-boot-volume",
+            "false",
+            "--force",
+        ],
+        empty_data={},
+    )
+    wait_for_resource(
+        lambda: get_instance(oci, instance_id),
+        DELETING_INSTANCE_STATES,
+        "TERMINATED",
+        args.instance_timeout,
+        "instance",
+    )
+    state.resource("instance", deleted=True, lifecycle_state="TERMINATED")
+
+
+def clean_image(args, oci, state, resources):
+    image = resources.get("image")
+    if not isinstance(image, dict) or image.get("deleted"):
+        return
+    image_id = image.get("id")
+    if not isinstance(image_id, str):
+        return
+    try:
+        current = get_image(oci, image_id)
+    except OCIError as error:
+        if not error.not_found:
+            raise
+        print(f"CLEAN  Image already absent: {image_id}")
+        state.resource("image", deleted=True)
+        return
+    if current.get("lifecycle-state") == "DELETED":
+        print(f"CLEAN  Image already deleted: {image_id}")
+        state.resource("image", deleted=True, lifecycle_state="DELETED")
+        return
+    print(f"CLEAN  Deleting custom image {image_id}")
+    oci.run(
+        ["compute", "image", "delete", "--image-id", image_id, "--force"],
+        empty_data={},
+    )
+    wait_for_deleted(
+        lambda: get_image(oci, image_id),
+        DELETING_IMAGE_STATES,
+        args.image_timeout,
+        "image",
+    )
+    state.resource("image", deleted=True, lifecycle_state="DELETED")
+
+
+def clean_object(oci, state, resources, namespace, bucket):
+    obj = resources.get("object")
+    if not isinstance(obj, dict) or obj.get("deleted"):
+        return
+    name = obj.get("name")
+    if not isinstance(name, str):
+        return
+    if head_object(oci, namespace, bucket, name) is None:
+        print(f"CLEAN  Object already absent: {bucket}/{name}")
+        state.resource("object", deleted=True)
+        return
+    print(f"CLEAN  Deleting object {bucket}/{name}")
+    oci.run(
+        [
+            "os",
+            "object",
+            "delete",
+            "--namespace",
+            namespace,
+            "--bucket-name",
+            bucket,
+            "--name",
+            name,
+            "--force",
+        ],
+        empty_data={},
+    )
+    if head_object(oci, namespace, bucket, name) is not None:
+        raise DeploymentError("object still exists after deletion")
+    state.resource("object", deleted=True)
+
+
+def clean_bucket(oci, state, resources, namespace):
+    bucket = resources.get("bucket")
+    if not isinstance(bucket, dict) or bucket.get("deleted"):
+        return
+    name = bucket.get("name")
+    if not isinstance(name, str):
+        return
+    if get_bucket(oci, namespace, name) is None:
+        print(f"CLEAN  Bucket already absent: {name}")
+        state.resource("bucket", deleted=True)
+        return
+    abort_multipart_uploads(oci, namespace, name)
+    objects = bucket_object_names(oci, namespace, name)
+    if objects:
+        raise DeploymentError(
+            f"refusing to delete non-empty bucket {name}: {', '.join(objects)}"
+        )
+    print(f"CLEAN  Deleting bucket {name}")
+    oci.run(
+        [
+            "os",
+            "bucket",
+            "delete",
+            "--namespace",
+            namespace,
+            "--name",
+            name,
+            "--force",
+        ],
+        empty_data={},
+    )
+    if get_bucket(oci, namespace, name) is not None:
+        raise DeploymentError("bucket still exists after deletion")
+    state.resource("bucket", deleted=True)
+
+
+def clean_deployment(args):
+    if shutil.which("oci") is None:
+        raise DeploymentError("required program not found: oci")
+    state = StateFile(args.state_file, resume=True)
+    oci = OCIRunner(args.profile, args.config_file, args.region, args.verbose)
+    resources = state.data.get("resources", {})
+    if not isinstance(resources, dict):
+        raise DeploymentError("state file resources are invalid")
+    namespace = state_namespace(args, oci, resources)
+    bucket_record = resources.get("bucket")
+    object_record = resources.get("object")
+    bucket = None
+    if isinstance(bucket_record, dict) and isinstance(bucket_record.get("name"), str):
+        bucket = bucket_record["name"]
+    elif isinstance(object_record, dict) and isinstance(object_record.get("bucket"), str):
+        bucket = object_record["bucket"]
+    clean_instance(args, oci, state, resources)
+    clean_image(args, oci, state, resources)
+    if bucket:
+        clean_object(oci, state, resources, namespace, bucket)
+        clean_bucket(oci, state, resources, namespace)
+    print(f"CLEAN  Removing state file {state.path}")
+    state.path.unlink()
+    print("DONE  Deployment state and recorded OCI resources are cleaned")
+    return 0
+
+
 def print_dry_run(args, image, image_sha256, namespace):
     bucket = args.bucket or args.create_bucket
     operations = []
@@ -1608,6 +1854,11 @@ def parse_args(argv=None):
         default=Path(".deploy-oci-state.json").resolve(),
     )
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument(
+        "--clean",
+        action="store_true",
+        help="delete recorded OCI resources from the state file, then remove the state file",
+    )
     parser.add_argument("--reuse-download", action="store_true")
     parser.add_argument("--reuse-object", action="store_true")
     parser.add_argument("--cleanup-object", action="store_true")
@@ -1637,6 +1888,10 @@ def parse_args(argv=None):
         parser.error("--boot-volume-gbs must be at least 50")
     if args.resume and args.dry_run:
         parser.error("--resume cannot be combined with --dry-run")
+    if args.clean and args.resume:
+        parser.error("--clean cannot be combined with --resume")
+    if args.clean and args.dry_run:
+        parser.error("--clean cannot be combined with --dry-run")
     return args
 
 
@@ -1768,6 +2023,8 @@ def deploy(args):
 def main(argv=None):
     args = parse_args(argv)
     try:
+        if args.clean:
+            return clean_deployment(args)
         return deploy(args)
     except KeyboardInterrupt:
         print("ERROR: interrupted; deployment state was preserved", file=sys.stderr)

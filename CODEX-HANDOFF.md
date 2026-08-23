@@ -105,6 +105,10 @@ Do not delete the state file during recovery. The deployer deliberately leaves
 the instance, image, and diagnostic evidence intact on failure. It never
 automatically terminates an instance or deletes a custom image.
 
+To discard a partial deployment and start fresh, run `./deploy-oci.py --clean`.
+It deletes only resources recorded in `.deploy-oci-state.json`, aborts recorded
+bucket multipart uploads, and removes the state file after successful cleanup.
+
 ## Current validation status
 
 - The local default suite passes 101 tests.

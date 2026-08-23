@@ -185,6 +185,19 @@ match.
 
 Do not delete the state file while recovering a partial deployment.
 
+To discard a partial deployment and start fresh, use the recorded state as the
+cleanup manifest:
+
+```bash
+./deploy-oci.py --clean
+```
+
+`--clean` terminates the recorded instance and deletes its boot volume, deletes
+the recorded custom image, deletes the recorded uploaded object, aborts pending
+multipart uploads in the recorded bucket, deletes the bucket only if it is
+empty, and removes `.deploy-oci-state.json` after successful cleanup. It does
+not discover or delete unrelated OCI resources.
+
 ## More things you should know
 
 ### Existing buckets and objects

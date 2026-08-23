@@ -844,6 +844,96 @@ class ObjectSafetyTests(unittest.TestCase):
             deploy.cleanup_bucket(args, oci, state, "ns", "bucket")
 
 
+class CleanDeploymentTests(unittest.TestCase):
+    def write_state(self, path):
+        path.write_text(
+            json.dumps(
+                {
+                    "schema_version": deploy.STATE_SCHEMA_VERSION,
+                    "deployment_id": str(deploy.uuid.uuid4()),
+                    "created_at": "2026-01-01T00:00:00Z",
+                    "updated_at": "2026-01-01T00:00:00Z",
+                    "phase": "failed",
+                    "resources": {
+                        "bucket": {"namespace": "ns", "name": "bucket"},
+                        "object": {
+                            "namespace": "ns",
+                            "bucket": "bucket",
+                            "name": "image.qcow2",
+                            "uploaded": True,
+                        },
+                        "image": {
+                            "id": "ocid1.image.oc1.us-test-1.image",
+                            "created": True,
+                        },
+                        "instance": {
+                            "id": "ocid1.instance.oc1.us-test-1.instance",
+                            "created": True,
+                        },
+                    },
+                }
+            )
+        )
+
+    def test_clean_deployment_deletes_recorded_resources_and_state(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            state_path = Path(temporary) / "state.json"
+            self.write_state(state_path)
+            args = mock.Mock(
+                state_file=state_path,
+                profile="DEFAULT",
+                config_file=None,
+                region=None,
+                verbose=False,
+                instance_timeout=30,
+                image_timeout=30,
+            )
+            oci = SequenceOCI(
+                [
+                    {"data": {"lifecycle-state": "RUNNING"}},
+                    {},
+                    {"data": {"lifecycle-state": "TERMINATED"}},
+                    {"data": {"lifecycle-state": "AVAILABLE"}},
+                    {},
+                    {"data": {"lifecycle-state": "DELETED"}},
+                    {"content-length": "1"},
+                    {},
+                    deploy.OCIError([], 1, "ServiceError: 404 NotAuthorizedOrNotFound"),
+                    {
+                        "data": {
+                            "public-access-type": "NoPublicAccess",
+                            "storage-tier": "Standard",
+                        }
+                    },
+                    {
+                        "data": [
+                            {
+                                "object": "image.qcow2",
+                                "upload-id": "upload",
+                            }
+                        ]
+                    },
+                    {},
+                    {"data": {"objects": []}},
+                    {},
+                    deploy.OCIError([], 1, "ServiceError: 404 NotAuthorizedOrNotFound"),
+                ]
+            )
+            with (
+                mock.patch.object(deploy.shutil, "which", return_value="/usr/bin/oci"),
+                mock.patch.object(deploy, "OCIRunner", return_value=oci),
+            ):
+                self.assertEqual(deploy.clean_deployment(args), 0)
+            self.assertFalse(state_path.exists())
+        commands = [call[0] for call in oci.calls]
+        self.assertEqual(commands[1][:3], ["compute", "instance", "terminate"])
+        self.assertEqual(commands[4][:3], ["compute", "image", "delete"])
+        self.assertEqual(commands[7][:3], ["os", "object", "delete"])
+        self.assertEqual(commands[10][:3], ["os", "multipart", "list"])
+        self.assertEqual(commands[11][:3], ["os", "multipart", "abort"])
+        self.assertEqual(commands[13][:3], ["os", "bucket", "delete"])
+
+
 class MutationCommandTests(unittest.TestCase):
     def state(self):
         return FakeState(
