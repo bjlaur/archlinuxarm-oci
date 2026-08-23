@@ -845,6 +845,14 @@ class RepositoryTests(unittest.TestCase):
             developers,
         )
 
+    def test_repository_uses_durable_agent_instructions(self):
+        instructions = (build.PROJECT / "AGENTS.md").read_text()
+        self.assertIn("entire repository", instructions)
+        self.assertIn("pacman -Sy --needed", instructions)
+        self.assertIn("deployment UUID and release SHA-256 tags", instructions)
+        self.assertFalse((build.PROJECT / "CODEX-HANDOFF.md").exists())
+        self.assertFalse((build.PROJECT / "docs/OCI-DEPLOYMENT-PLAN.md").exists())
+
     def test_release_workflow_smokes_the_uploaded_artifact_before_publish(self):
         workflow = self.release_workflow()
         self.assertIn("build-info.json", workflow)

@@ -132,7 +132,5 @@ network security lists or NSGs remain responsible for inbound access.
   builds, tests, CI, and releases.
 - [Code review](docs/CODE-REVIEW.md): prioritized findings from the full
   repository review.
-- [Maintainer handoff](CODEX-HANDOFF.md): review scope, implemented changes,
-  validation, and remaining work.
 
 License: [MIT](LICENSE).

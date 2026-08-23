@@ -165,9 +165,8 @@ boundary, accepting the extra I/O cost for a stronger resumable-build claim.
 
 #### Record real-OCI acceptance evidence
 
-`docs/OCI-DEPLOYMENT-PLAN.md` correctly says the workflow is incomplete until
-the exact published UEFI/GPT image boots on real A1 hardware, but the
-repository contains no dated acceptance record tied to a release/tag.
+The repository contains no dated acceptance record tying an exact published
+UEFI/GPT image to a successful boot on real A1 hardware.
 
 Recommended change: add a compact acceptance record with release tag, region,
 shape, import result, capability result, boot result, SSH/cloud-init check, and

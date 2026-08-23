@@ -224,6 +224,4 @@ instructions.
 - [OCI preparation](OCI-PREPARATION.md): tenancy, CLI, IAM, and networking.
 - [OCI deployment](OCI-DEPLOYMENT.md): full automation and manual procedure.
 - [Developer guide](../DEVELOPERS.md): build and maintenance workflow.
-- [OCI deployment design record](OCI-DEPLOYMENT-PLAN.md): original constraints
-  and acceptance criteria.
 - [Code review](CODE-REVIEW.md): prioritized implementation findings.
