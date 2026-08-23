@@ -185,7 +185,7 @@ class OCIRunner:
         command.extend(["--output", "json"])
         return command
 
-    def run(self, arguments, *, passthrough=False):
+    def run(self, arguments, *, passthrough=False, empty_data=None):
         command = self.command(arguments)
         if self.verbose:
             print(f"+ {compact_command(command)}", file=sys.stderr, flush=True)
@@ -200,6 +200,8 @@ class OCIRunner:
             raise OCIError(command, completed.returncode, completed.stderr or "")
         if passthrough:
             return None
+        if completed.stdout.strip() == "" and empty_data is not None:
+            return {"data": empty_data}
         try:
             return json.loads(completed.stdout)
         except json.JSONDecodeError as error:
@@ -1123,7 +1125,8 @@ def validate_capabilities(oci, image_id):
                 "--image-id",
                 image_id,
                 "--all",
-            ]
+            ],
+            empty_data=[],
         ),
         list,
         "image capability schema response",

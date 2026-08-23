@@ -572,6 +572,17 @@ class RunnerTests(unittest.TestCase):
             with self.assertRaisesRegex(deploy.DeploymentError, "invalid JSON"):
                 deploy.OCIRunner().run(["os", "ns", "get"])
 
+    def test_runner_can_treat_empty_stdout_as_empty_data(self):
+        completed = subprocess.CompletedProcess([], 0, "", "")
+        with mock.patch.object(deploy.subprocess, "run", return_value=completed):
+            self.assertEqual(
+                deploy.OCIRunner().run(
+                    ["compute", "image-capability-schema", "list"],
+                    empty_data=[],
+                ),
+                {"data": []},
+            )
+
     def test_oci_error_recognizes_only_not_found_responses(self):
         missing = deploy.OCIError([], 1, "ServiceError: 404 NotAuthorizedOrNotFound")
         forbidden = deploy.OCIError([], 1, "ServiceError: 403 NotAllowed")
