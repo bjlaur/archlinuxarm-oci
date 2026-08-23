@@ -1001,16 +1001,20 @@ class Builder:
             if self.admin_user != FACTORY_USER or re.search(r"^arch:", passwd, re.MULTILINE):
                 raise RuntimeError("factory image must preserve alarm and must not contain an arch account")
             required = (
-                "AllowUsers alarm", "PasswordAuthentication no", "PubkeyAuthentication yes",
+                "PasswordAuthentication no", "PubkeyAuthentication yes",
                 "KbdInteractiveAuthentication no", "PermitRootLogin no", "PermitEmptyPasswords no",
             )
         else:
             if re.search(r"^alarm:", passwd, re.MULTILINE):
                 raise RuntimeError("development image still contains the upstream alarm account")
             required = (
-                f"AllowUsers {self.admin_user}", "PasswordAuthentication yes", "PubkeyAuthentication no",
+                "PasswordAuthentication yes", "PubkeyAuthentication no",
                 "KbdInteractiveAuthentication no", "PermitRootLogin no", "PermitEmptyPasswords no",
             )
+        forbidden = ("AllowUsers", "DenyUsers", "AllowGroups", "DenyGroups")
+        for directive in forbidden:
+            if re.search(rf"^\s*{directive}\b", ssh, re.IGNORECASE | re.MULTILINE):
+                raise RuntimeError(f"completed image contains an SSH account restriction: {directive}")
         for line in required:
             if line not in ssh:
                 raise RuntimeError(f"completed image is missing SSH policy: {line}")

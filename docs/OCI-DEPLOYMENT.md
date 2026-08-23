@@ -108,7 +108,7 @@ to the new volume size.
 - cloud-init completion;
 - passwordless sudo;
 - locked root password, usable `alarm` console password, and disabled SSH password authentication;
-- networking, SSH, nftables, and SSHGuard services; and
+- networking, SSH, and SSHGuard services; and
 - successful root-filesystem expansion.
 
 Only the public half of the managed key pair is supplied to OCI. The private
@@ -148,7 +148,7 @@ cloud-init status --wait --long
 sudo -n true
 sudo passwd -S root
 sudo passwd -S alarm
-systemctl is-active systemd-networkd systemd-resolved sshd nftables sshguard
+systemctl is-active systemd-networkd systemd-resolved sshd sshguard
 sudo systemctl status oci-grow-root.service --no-pager
 test -e /var/lib/oci-root-grown
 lsblk -f
@@ -157,7 +157,8 @@ df -hT /
 
 The root password status should be locked, the `alarm` password should remain
 usable for console recovery, the services should be active, and `/` should
-occupy nearly the selected boot-volume size.
+occupy nearly the selected boot-volume size. Inbound traffic is governed by the
+instance's OCI security lists or network security groups.
 
 The instance is now ready for normal Arch Linux ARM administration.
 

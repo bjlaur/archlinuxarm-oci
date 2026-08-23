@@ -20,7 +20,6 @@ systemctl enable \
     sshd.service \
     systemd-networkd.service \
     systemd-resolved.service \
-    nftables.service \
     sshguard.service \
     serial-getty@ttyAMA0.service \
     oci-grow-root.service

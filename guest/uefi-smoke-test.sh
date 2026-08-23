@@ -55,7 +55,7 @@ fi
 ssh-keygen -A
 sshd -t
 effective="$(sshd -T)"
-grep -Fqxi "allowusers $image_user" <<<"$effective"
+! grep -Eqxi '(allowusers|denyusers|allowgroups|denygroups)[[:space:]].*' <<<"$effective"
 if [[ "$build_mode" == factory ]]; then
     grep -Fqxi 'passwordauthentication no' <<<"$effective"
     grep -Fqxi 'pubkeyauthentication yes' <<<"$effective"
@@ -65,8 +65,7 @@ else
 fi
 grep -Fqxi 'kbdinteractiveauthentication no' <<<"$effective"
 grep -Fqxi 'permitrootlogin no' <<<"$effective"
-nft -c -f /etc/nftables.conf
-systemctl is-enabled sshd.service systemd-networkd.service systemd-resolved.service nftables.service sshguard.service oci-grow-root.service >/dev/null
+systemctl is-enabled sshd.service systemd-networkd.service systemd-resolved.service sshguard.service oci-grow-root.service >/dev/null
 
 echo OCI_IMAGE_UEFI_SMOKE_SUCCESS
 sync

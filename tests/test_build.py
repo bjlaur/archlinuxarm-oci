@@ -181,8 +181,8 @@ class ValidationTests(unittest.TestCase):
 
     def test_templates_have_no_unexpanded_values(self):
         rendered = build.render_template("sshd-security-development.conf", IMAGE_USER="tester")
-        self.assertIn("AllowUsers tester", rendered)
         self.assertNotIn("{{", rendered)
+        self.assertNotRegex(rendered, r"(?im)^\s*(?:Allow|Deny)(?:Users|Groups)\b")
 
     def test_factory_cli_and_conflicts(self):
         args = build.parse_args(["--factory-image"])
@@ -334,9 +334,12 @@ class ArchiveTests(unittest.TestCase):
         factory = (build.PROJECT / "templates/sshd-security-factory.conf").read_text()
         self.assertIn("PasswordAuthentication yes", development)
         self.assertIn("PubkeyAuthentication no", development)
-        self.assertIn("AllowUsers alarm", factory)
         self.assertIn("PasswordAuthentication no", factory)
         self.assertIn("PubkeyAuthentication yes", factory)
+        for template in (development, factory):
+            self.assertNotRegex(
+                template, r"(?im)^\s*(?:Allow|Deny)(?:Users|Groups)\b"
+            )
 
     def test_conversion_uses_zstd_compression(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -818,11 +821,15 @@ class RepositoryTests(unittest.TestCase):
         self.assertIn("/sys/block/vda/serial", entrypoint)
         self.assertNotIn("/sys/block/vda/device/serial", entrypoint)
 
-    def test_nftables_is_validated_after_reboot_into_installed_kernel(self):
-        entrypoint = (build.PROJECT / "guest" / "build-entrypoint.sh").read_text()
-        smoke_test = (build.PROJECT / "guest" / "uefi-smoke-test.sh").read_text()
-        self.assertNotIn("nft -c -f /etc/nftables.conf", entrypoint)
-        self.assertIn("nft -c -f /etc/nftables.conf", smoke_test)
+    def test_guest_enables_sshguard_without_a_static_host_firewall(self):
+        configure = (build.PROJECT / "guest/configure.sh").read_text()
+        finalize = (build.PROJECT / "guest/finalize.sh").read_text()
+        smoke_test = (build.PROJECT / "guest/uefi-smoke-test.sh").read_text()
+        self.assertIn("nftables sshguard", configure)
+        self.assertNotIn("nftables.service", finalize)
+        self.assertIn("sshguard.service", finalize)
+        self.assertNotIn("nft -c -f /etc/nftables.conf", smoke_test)
+        self.assertIn("sshguard.service", smoke_test)
 
     def test_grow_root_validates_partition_number(self):
         grow_root = (build.PROJECT / "overlay/usr/local/sbin/oci-grow-root").read_text()
@@ -860,7 +867,7 @@ class RepositoryTests(unittest.TestCase):
                 member = archive.getmember("example")
                 self.assertEqual((member.uid, member.gid), (0, 0))
 
-    def test_package_owned_configuration_is_applied_after_pacman(self):
+    def test_payload_contains_sshguard_without_a_static_firewall_policy(self):
         with tempfile.TemporaryDirectory() as directory:
             args = build.parse_args(["--username", "tester"])
             builder = build.Builder(args)
@@ -871,9 +878,7 @@ class RepositoryTests(unittest.TestCase):
                 names = set(archive.getnames())
 
             prefix = "usr/local/lib/archlinuxarm-oci-builder/final-root/"
-            self.assertNotIn("etc/nftables.conf", names)
-            self.assertNotIn("etc/sshguard.conf", names)
-            self.assertIn(prefix + "etc/nftables.conf", names)
+            self.assertFalse(any("nftables" in name for name in names))
             self.assertIn(prefix + "etc/sshguard.conf", names)
             self.assertIn("etc/fstab", names)
             self.assertIn("etc/systemd/network/20-oci.network", names)

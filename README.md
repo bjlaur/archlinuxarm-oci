@@ -125,8 +125,9 @@ Published factory images contain:
 On first boot, cloud-init's Oracle datasource obtains the instance metadata,
 applies OCI's SSH key to the existing upstream `alarm` account, and processes
 supported user-data and hostname metadata. SSH password authentication and root
-SSH remain disabled. nftables uses a default-deny inbound policy, and SSHGuard
-is enabled.
+SSH remain disabled. Network ingress is controlled by OCI security lists or
+network security groups. The image does not configure or enable a static host firewall;
+SSHGuard dynamically blocks sources that repeatedly fail SSH authentication.
 
 ## Automated releases
 

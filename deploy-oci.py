@@ -1523,7 +1523,7 @@ def verify_ssh(args, addresses, state):
             "test $(sudo passwd -S root | awk '{print $2}') = L",
             "test $(sudo passwd -S alarm | awk '{print $2}') != L",
             "systemctl is-active systemd-networkd.service systemd-resolved.service "
-            "sshd.service nftables.service sshguard.service",
+            "sshd.service sshguard.service",
             "test -e /var/lib/oci-root-grown",
             "findmnt -no SOURCE,FSTYPE,SIZE /",
         ]
