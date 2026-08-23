@@ -225,3 +225,5 @@ instructions.
 - [OCI deployment](OCI-DEPLOYMENT.md): full automation and manual procedure.
 - [Developer guide](../DEVELOPERS.md): build and maintenance workflow.
 - [Code review](CODE-REVIEW.md): prioritized implementation findings.
+- [OCI smoke CI plan](OCI-SMOKE-CI-PLAN.md): deferred proposal for real-OCI
+  acceptance testing from GitHub Actions.
