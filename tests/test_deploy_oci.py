@@ -1139,6 +1139,7 @@ class DryRunTests(unittest.TestCase):
         args = valid_args("--dry-run", "--reuse-download")
         metadata = {"image_filename": "image.qcow2", "image_sha256": "a" * 64}
         with (
+            mock.patch.object(deploy, "validate_local_tools"),
             mock.patch.object(
                 deploy,
                 "validate_prerequisites",

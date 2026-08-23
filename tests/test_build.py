@@ -1,6 +1,7 @@
 import argparse
 import io
 import inspect
+import json
 import os
 from pathlib import Path
 import sys
@@ -366,6 +367,16 @@ class ArchiveTests(unittest.TestCase):
             self.assertEqual(state["stage"], "converted")
             self.assertFalse(state["smoke_passed"])
             self.assertEqual(state["converted_image"]["format"], "qcow2")
+            checksum = (base / "output.qcow2.sha256").read_text()
+            self.assertEqual(
+                checksum,
+                f"{state['converted_image']['sha256']}  output.qcow2\n",
+            )
+            metadata = json.loads((base / "build-info.json").read_text())
+            self.assertEqual(metadata["image_filename"], "output.qcow2")
+            self.assertEqual(metadata["image_sha256"], state["converted_image"]["sha256"])
+            self.assertEqual(metadata["build_mode"], "development")
+            self.assertEqual(metadata["image_user"], "tester")
 
     def test_exact_work_directory_is_retained(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -676,6 +687,9 @@ class RepositoryTests(unittest.TestCase):
         self.assertNotIn('"$GITHUB_SHA" !=', workflow)
         self.assertNotIn("project-or-upstream-changed", workflow)
         self.assertIn('elif [[ "$checksum" != "$latest_md5" ]]; then', workflow)
+        self.assertIn("python3 -m unittest tests.test_build -v", workflow)
+        self.assertNotIn("python3 -m unittest discover -s tests", workflow)
+        self.assertIn("python3 -m py_compile build.py deploy-oci.py download-latest.py", workflow)
 
     def test_scheduled_checker_dispatches_only_for_an_upstream_change(self):
         workflow = self.upstream_workflow()

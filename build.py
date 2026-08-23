@@ -7,6 +7,7 @@ import argparse
 import atexit
 import base64
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import getpass
 import hashlib
 import json
@@ -465,7 +466,7 @@ class Builder:
                 digest.update(chunk)
         return digest.hexdigest()
 
-    def record_conversion(self, digest: str) -> None:
+    def record_conversion(self, digest: str) -> dict[str, object]:
         state = self.require_matching_state()
         state.update({
             "stage": "converted",
@@ -480,6 +481,46 @@ class Builder:
             },
         })
         self.update_state(state)
+        return state
+
+    @staticmethod
+    def current_git_sha() -> str:
+        result = subprocess.run(
+            ["git", "-C", str(PROJECT), "rev-parse", "HEAD"],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+        sha = result.stdout.strip()
+        if result.returncode != 0 or not re.fullmatch(r"[0-9a-f]{40}", sha):
+            return "unknown"
+        return sha
+
+    def write_download_metadata(self, digest: str, state: dict[str, object]) -> None:
+        checksum_path = self.output.with_suffix(self.output.suffix + ".sha256")
+        checksum_path.write_text(f"{digest}  {self.output.name}\n", encoding="utf-8")
+
+        git_sha = self.current_git_sha()
+        metadata = {
+            "schema_version": 1,
+            "build_date_utc": datetime.now(timezone.utc)
+            .replace(microsecond=0)
+            .isoformat()
+            .replace("+00:00", "Z"),
+            "git_sha": git_sha,
+            "git_short_sha": git_sha[:7] if git_sha != "unknown" else "unknown",
+            "build_mode": state["build_mode"],
+            "image_user": state["image_user"],
+            "upstream_rootfs_url": self.args.rootfs_url,
+            "upstream_md5": "local",
+            "image_filename": self.output.name,
+            "image_sha256": digest,
+        }
+        if state["build_mode"] == "factory":
+            metadata["factory_user"] = state["image_user"]
+        metadata_path = self.output.parent / "build-info.json"
+        metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
     def resolve_converted_image(self, state: dict[str, object]) -> Path:
         assert self.work
@@ -1213,7 +1254,8 @@ class Builder:
         os.replace(temporary, self.output)
         run(["qemu-img", "info", "-f", "qcow2", self.output])
         digest = self.image_sha256(self.output)
-        self.record_conversion(digest)
+        state = self.record_conversion(digest)
+        self.write_download_metadata(digest, state)
         done = colorize("DONE:", ANSI_GREEN)
         sha256 = colorize("SHA256:", ANSI_GREEN)
         print(f"\n{done} {self.output}\n{sha256} {digest}")

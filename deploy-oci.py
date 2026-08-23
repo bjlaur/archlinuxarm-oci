@@ -19,6 +19,12 @@ import time
 import uuid
 
 
+ANSI_RESET = "\033[0m"
+ANSI_BOLD_BLUE = "\033[1;34m"
+ANSI_BOLD_GREEN = "\033[1;32m"
+ANSI_BOLD_RED = "\033[1;31m"
+ANSI_DIM_CYAN = "\033[2;36m"
+ANSI_YELLOW = "\033[33m"
 PROJECT = Path(__file__).resolve().parent
 DOWNLOADER = PROJECT / "download-latest.py"
 STATE_SCHEMA_VERSION = 1
@@ -61,6 +67,30 @@ class OCIError(DeploymentError):
         return bool(
             re.search(r"\b404\b|NotAuthorizedOrNotFound", self.stderr, re.IGNORECASE)
         )
+
+
+def colorize(text, style, *, stream=None):
+    output = sys.stdout if stream is None else stream
+    is_tty = getattr(output, "isatty", lambda: False)()
+    if "NO_COLOR" in os.environ or os.environ.get("TERM") == "dumb" or not is_tty:
+        return text
+    return f"{style}{text}{ANSI_RESET}"
+
+
+STATUS_STYLES = {
+    "DONE": ANSI_BOLD_GREEN,
+    "ERROR": ANSI_BOLD_RED,
+    "WARNING": ANSI_YELLOW,
+    "CLEAN": ANSI_YELLOW,
+    "CLEANUP": ANSI_YELLOW,
+    "DRY-RUN": ANSI_DIM_CYAN,
+}
+
+
+def print_status(label, message, *, stream=None):
+    output = sys.stdout if stream is None else stream
+    style = STATUS_STYLES.get(label, ANSI_BOLD_BLUE)
+    print(f"{colorize(label, style, stream=output)}  {message}", file=output, flush=True)
 
 
 def compact_command(command):
@@ -198,7 +228,11 @@ class OCIRunner:
     def run(self, arguments, *, passthrough=False, empty_data=None):
         command = self.command(arguments)
         if self.verbose:
-            print(f"+ {compact_command(command)}", file=sys.stderr, flush=True)
+            print(
+                colorize("+ " + compact_command(command), ANSI_DIM_CYAN, stream=sys.stderr),
+                file=sys.stderr,
+                flush=True,
+            )
         completed = subprocess.run(
             command,
             check=False,
@@ -273,7 +307,7 @@ def obtain_release(args):
     if args.reuse_download or args.resume:
         return parse_release(directory)
     directory.mkdir(parents=True, exist_ok=True)
-    print(f"VERIFY  Downloading and verifying the latest release in {directory}")
+    print_status("VERIFY", f"Downloading and verifying the latest release in {directory}")
     subprocess.run([sys.executable, str(DOWNLOADER), str(directory)], check=True)
     return parse_release(directory)
 
@@ -306,7 +340,7 @@ def prepare_ssh_key(args):
         )
     if not private_exists:
         private_key.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        print(f"SSH-KEY  Generating dedicated Ed25519 key pair at {private_key}")
+        print_status("SSH-KEY", f"Generating dedicated Ed25519 key pair at {private_key}")
         completed = subprocess.run(
             [
                 "ssh-keygen",
@@ -377,9 +411,9 @@ def choose_candidate(label, candidates, describe, input_fn=None, default=None):
         raise DeploymentError(f"no suitable {label}s were discovered")
     if len(candidates) == 1:
         selected = candidates[0]
-        print(f"DISCOVER  Automatically selected {label}: {describe(selected)}")
+        print_status("DISCOVER", f"Automatically selected {label}: {describe(selected)}")
         return selected
-    print(f"DISCOVER  Available {label}s:")
+    print_status("DISCOVER", f"Available {label}s:")
     for number, candidate in enumerate(candidates, 1):
         suffix = " (default)" if default == number - 1 else ""
         print(f"  {number}. {describe(candidate)}{suffix}")
@@ -502,7 +536,7 @@ def resolve_deployment_inputs(args, oci, environ=None, input_fn=None):
             "subnet response",
         )
     else:
-        print("DISCOVER  Searching OCI for accessible subnets")
+        print_status("DISCOVER", "Searching OCI for accessible subnets")
         candidates = discover_subnets(args, oci)
         subnet = choose_candidate(
             "subnet", candidates, describe_subnet, input_fn=input_fn
@@ -515,7 +549,7 @@ def resolve_deployment_inputs(args, oci, environ=None, input_fn=None):
         args.compartment_id = subnet.get("compartment-id")
         if not isinstance(args.compartment_id, str):
             raise DeploymentError("selected subnet has no compartment OCID")
-        print("DISCOVER  Using the selected subnet's compartment for the deployment")
+        print_status("DISCOVER", "Using the selected subnet's compartment for the deployment")
 
     subnet_ad = subnet.get("availability-domain")
     if args.availability_domain is None and subnet_ad:
@@ -619,7 +653,7 @@ def resolve_bucket_selection(args, environ=None, input_fn=None):
     if answer not in ("", "y", "yes"):
         raise DeploymentError("bucket creation cancelled")
     args.create_bucket = name
-    print(f"BUCKET  Selected private Standard bucket: {name}")
+    print_status("BUCKET", f"Selected private Standard bucket: {name}")
 
 
 def resolve_bucket_cleanup(args, input_fn=None):
@@ -775,7 +809,7 @@ def ensure_bucket(args, oci, state, namespace, tags):
             )
             resume_without_bucket_record = args.resume and not recorded
             if allow_existing or resumed_preexisting or resume_without_bucket_record:
-                print(f"UPLOAD  Using existing private Object Storage bucket {name}")
+                print_status("UPLOAD", f"Using existing private Object Storage bucket {name}")
                 created = False
             elif not args.resume:
                 raise DeploymentError(
@@ -788,7 +822,7 @@ def ensure_bucket(args, oci, state, namespace, tags):
             else:
                 created = True
         else:
-            print(f"UPLOAD  Creating private Object Storage bucket {name}")
+            print_status("UPLOAD", f"Creating private Object Storage bucket {name}")
             bucket = response_data(
                 oci.run(
                     [
@@ -908,7 +942,7 @@ def ensure_object(args, oci, state, namespace, bucket, image, image_sha256):
                 "existing Object Storage object lacks matching release SHA-256 metadata"
             )
     else:
-        print(f"UPLOAD  Uploading {image} to {bucket}/{name}")
+        print_status("UPLOAD", f"Uploading {image} to {bucket}/{name}")
         oci.run(
             [
                 "os",
@@ -979,7 +1013,7 @@ def wait_for_resource(getter, active_states, success_state, timeout, description
         state = lifecycle_value(resource, description)
         elapsed = int(now - started)
         if state != last_state or now - last_reported >= progress_interval:
-            print(f"{description.upper()}  {state} ({elapsed}s)")
+            print_status(description.upper(), f"{state} ({elapsed}s)")
             last_state = state
             last_reported = now
         if state == success_state:
@@ -1036,8 +1070,8 @@ def create_image(args, oci, state, namespace, bucket, object_name, tags):
     if image_id:
         image = get_image(oci, image_id)
     else:
-        print(f"IMPORT  Importing {bucket}/{object_name} as {args.image_name}")
-        print("IMPORT  OCI image import may take several minutes")
+        print_status("IMPORT", f"Importing {bucket}/{object_name} as {args.image_name}")
+        print_status("IMPORT", "OCI image import may take several minutes")
         image = response_data(
             oci.run(
                 [
@@ -1132,7 +1166,7 @@ def ensure_image_capability_schema(
 ):
     desired = capability_schema_payload(base_schema)
     if not image_schemas:
-        print("CAPABILITIES  Creating image capability schema")
+        print_status("CAPABILITIES", "Creating image capability schema")
         image_schema = response_data(
             oci.run(
                 [
@@ -1181,7 +1215,7 @@ def ensure_image_capability_schema(
     }
     if not mismatches:
         return current
-    print("CAPABILITIES  Updating image capability schema")
+    print_status("CAPABILITIES", "Updating image capability schema")
     updated = response_data(
         oci.run(
             [
@@ -1286,7 +1320,7 @@ def ensure_shape_compatibility(oci, image_id, shape, state=None):
         entry.get("shape") == shape for entry in entries if isinstance(entry, dict)
     )
     if not compatible:
-        print(f"CAPABILITIES  Adding {shape} compatibility")
+        print_status("CAPABILITIES", f"Adding {shape} compatibility")
         command = [
             "compute",
             "image-shape-compatibility-entry",
@@ -1394,7 +1428,7 @@ def launch_instance(args, oci, state, image_id, tags):
     if instance_id:
         instance = get_instance(oci, instance_id)
     else:
-        print(f"LAUNCH  Launching {args.instance_name} on {args.shape}")
+        print_status("LAUNCH", f"Launching {args.instance_name} on {args.shape}")
         with tempfile.TemporaryDirectory(prefix="archlinuxarm-oci-user-data.") as temp:
             user_data = Path(temp) / "cloud-init.yaml"
             user_data.write_text(
@@ -1515,7 +1549,7 @@ def verify_ssh(args, addresses, state):
         remote,
     ]
     deadline = time.monotonic() + args.ssh_timeout
-    print(f"SSH-CHECK  Waiting for alarm@{address}")
+    print_status("SSH-CHECK", f"Waiting for alarm@{address}")
     while True:
         completed = subprocess.run(command, check=False)
         if completed.returncode == 0:
@@ -1542,7 +1576,7 @@ def cleanup_object(args, oci, state, namespace, bucket, object_name):
     instance = state.data.get("resources", {}).get("instance", {})
     if image.get("lifecycle_state") != "AVAILABLE" or instance.get("lifecycle_state") != "RUNNING":
         raise DeploymentError("refusing object cleanup before image and instance are ready")
-    print(f"CLEANUP  Deleting temporary object {bucket}/{object_name}")
+    print_status("CLEANUP", f"Deleting temporary object {bucket}/{object_name}")
     oci.run(
         [
             "os",
@@ -1610,7 +1644,7 @@ def cleanup_bucket(args, oci, state, namespace, bucket):
         raise DeploymentError(
             f"refusing to delete non-empty bucket {bucket}: {', '.join(objects)}"
         )
-    print(f"CLEANUP  Deleting Object Storage bucket {bucket}")
+    print_status("CLEANUP", f"Deleting Object Storage bucket {bucket}")
     oci.run(
         [
             "os",
@@ -1667,7 +1701,7 @@ def abort_multipart_uploads(oci, namespace, bucket):
         upload_id = upload.get("upload-id")
         if not isinstance(name, str) or not isinstance(upload_id, str):
             raise DeploymentError("multipart upload lacks an object name or upload ID")
-        print(f"CLEAN  Aborting multipart upload {bucket}/{name}")
+        print_status("CLEAN", f"Aborting multipart upload {bucket}/{name}")
         oci.run(
             [
                 "os",
@@ -1699,14 +1733,14 @@ def clean_instance(args, oci, state, resources):
     except OCIError as error:
         if not error.not_found:
             raise
-        print(f"CLEAN  Instance already absent: {instance_id}")
+        print_status("CLEAN", f"Instance already absent: {instance_id}")
         state.resource("instance", deleted=True)
         return
     if current.get("lifecycle-state") == "TERMINATED":
-        print(f"CLEAN  Instance already terminated: {instance_id}")
+        print_status("CLEAN", f"Instance already terminated: {instance_id}")
         state.resource("instance", deleted=True, lifecycle_state="TERMINATED")
         return
-    print(f"CLEAN  Terminating instance {instance_id}")
+    print_status("CLEAN", f"Terminating instance {instance_id}")
     oci.run(
         [
             "compute",
@@ -1742,14 +1776,14 @@ def clean_image(args, oci, state, resources):
     except OCIError as error:
         if not error.not_found:
             raise
-        print(f"CLEAN  Image already absent: {image_id}")
+        print_status("CLEAN", f"Image already absent: {image_id}")
         state.resource("image", deleted=True)
         return
     if current.get("lifecycle-state") == "DELETED":
-        print(f"CLEAN  Image already deleted: {image_id}")
+        print_status("CLEAN", f"Image already deleted: {image_id}")
         state.resource("image", deleted=True, lifecycle_state="DELETED")
         return
-    print(f"CLEAN  Deleting custom image {image_id}")
+    print_status("CLEAN", f"Deleting custom image {image_id}")
     oci.run(
         ["compute", "image", "delete", "--image-id", image_id, "--force"],
         empty_data={},
@@ -1771,10 +1805,10 @@ def clean_object(oci, state, resources, namespace, bucket):
     if not isinstance(name, str):
         return
     if head_object(oci, namespace, bucket, name) is None:
-        print(f"CLEAN  Object already absent: {bucket}/{name}")
+        print_status("CLEAN", f"Object already absent: {bucket}/{name}")
         state.resource("object", deleted=True)
         return
-    print(f"CLEAN  Deleting object {bucket}/{name}")
+    print_status("CLEAN", f"Deleting object {bucket}/{name}")
     oci.run(
         [
             "os",
@@ -1803,7 +1837,7 @@ def clean_bucket(oci, state, resources, namespace):
     if not isinstance(name, str):
         return
     if get_bucket(oci, namespace, name) is None:
-        print(f"CLEAN  Bucket already absent: {name}")
+        print_status("CLEAN", f"Bucket already absent: {name}")
         state.resource("bucket", deleted=True)
         return
     abort_multipart_uploads(oci, namespace, name)
@@ -1812,7 +1846,7 @@ def clean_bucket(oci, state, resources, namespace):
         raise DeploymentError(
             f"refusing to delete non-empty bucket {name}: {', '.join(objects)}"
         )
-    print(f"CLEAN  Deleting bucket {name}")
+    print_status("CLEAN", f"Deleting bucket {name}")
     oci.run(
         [
             "os",
@@ -1852,9 +1886,9 @@ def clean_deployment(args):
     if bucket:
         clean_object(oci, state, resources, namespace, bucket)
         clean_bucket(oci, state, resources, namespace)
-    print(f"CLEAN  Removing state file {state.path}")
+    print_status("CLEAN", f"Removing state file {state.path}")
     state.path.unlink()
-    print("DONE  Deployment state and recorded OCI resources are cleaned")
+    print_status("DONE", "Deployment state and recorded OCI resources are cleaned")
     return 0
 
 
@@ -1880,7 +1914,7 @@ def print_dry_run(args, image, image_sha256, namespace):
         operations.append("delete the uploaded object after successful launch")
     if args.cleanup_bucket:
         operations.append("delete the bucket after successful launch if it is empty")
-    print("DRY-RUN  Read-only validation passed. Planned mutations:")
+    print_status("DRY-RUN", "Read-only validation passed. Planned mutations:")
     for number, operation in enumerate(operations, 1):
         print(f"  {number}. {operation}")
 
@@ -2052,7 +2086,7 @@ def deploy(args):
     discovered = resolve_deployment_inputs(args, oci)
     resolve_bucket_selection(args)
     resolve_bucket_cleanup(args)
-    print("VALIDATE  Checking local tools, OCI access, network, and A1 shape")
+    print_status("VALIDATE", "Checking local tools, OCI access, network, and A1 shape")
     namespace, subnet, shape, fingerprint = validate_prerequisites(
         args, oci, discovered
     )
@@ -2105,7 +2139,7 @@ def deploy(args):
         state.record_failure(error)
         raise
 
-    print("DONE  OCI instance is running")
+    print_status("DONE", "OCI instance is running")
     print(f"Instance OCID: {instance_id}")
     print(f"Private IP: {addresses.get('private_ip') or 'unavailable'}")
     print(f"Public IP: {addresses.get('public_ip') or 'unavailable'}")
@@ -2128,10 +2162,14 @@ def main(argv=None):
             return clean_deployment(args)
         return deploy(args)
     except KeyboardInterrupt:
-        print("ERROR: interrupted; deployment state was preserved", file=sys.stderr)
+        print(
+            f"{colorize('ERROR:', ANSI_BOLD_RED, stream=sys.stderr)} "
+            "interrupted; deployment state was preserved",
+            file=sys.stderr,
+        )
         return 130
     except (DeploymentError, OSError, subprocess.CalledProcessError) as error:
-        print(f"ERROR: {error}", file=sys.stderr)
+        print(f"{colorize('ERROR:', ANSI_BOLD_RED, stream=sys.stderr)} {error}", file=sys.stderr)
         return 1
 
 
