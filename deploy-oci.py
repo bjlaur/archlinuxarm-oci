@@ -30,12 +30,6 @@ REQUIRED_CAPABILITIES = {
     "Network.AttachmentType": "PARAVIRTUALIZED",
     "Storage.BootVolumeType": "PARAVIRTUALIZED",
 }
-REQUIRED_LAUNCH_OPTIONS = {
-    "firmware": "UEFI_64",
-    "networkType": "PARAVIRTUALIZED",
-    "bootVolumeType": "PARAVIRTUALIZED",
-    "remoteDataVolumeType": "PARAVIRTUALIZED",
-}
 ACTIVE_IMAGE_STATES = {"IMPORTING", "PROVISIONING"}
 ACTIVE_INSTANCE_STATES = {"PROVISIONING", "STARTING"}
 DELETING_IMAGE_STATES = {"IMPORTING", "PROVISIONING", "AVAILABLE", "EXPORTING", "DISABLED"}
@@ -1043,6 +1037,7 @@ def create_image(args, oci, state, namespace, bucket, object_name, tags):
         image = get_image(oci, image_id)
     else:
         print(f"IMPORT  Importing {bucket}/{object_name} as {args.image_name}")
+        print("IMPORT  OCI image import may take several minutes")
         image = response_data(
             oci.run(
                 [
@@ -1110,7 +1105,106 @@ def schema_data(resource):
     return data
 
 
-def validate_capabilities(oci, image_id):
+def capability_schema_payload(base_schema):
+    payload = {}
+    for name, entry in base_schema.items():
+        if not isinstance(entry, dict):
+            continue
+        descriptor = {
+            "defaultValue": schema_default(entry),
+            "descriptorType": entry.get("descriptor-type", entry.get("descriptorType")),
+            "source": "IMAGE",
+        }
+        values = entry.get("values")
+        if isinstance(values, list):
+            descriptor["values"] = values
+        payload[name] = {
+            key: value for key, value in descriptor.items() if value is not None
+        }
+    for name, value in REQUIRED_CAPABILITIES.items():
+        payload.setdefault(name, {"descriptorType": "enumstring", "source": "IMAGE"})
+        payload[name]["defaultValue"] = value
+    return payload
+
+
+def ensure_image_capability_schema(
+    args, oci, image_id, global_version_name, base_schema, image_schemas, tags
+):
+    desired = capability_schema_payload(base_schema)
+    if not image_schemas:
+        print("CAPABILITIES  Creating image capability schema")
+        image_schema = response_data(
+            oci.run(
+                [
+                    "compute",
+                    "image-capability-schema",
+                    "create",
+                    "--compartment-id",
+                    args.compartment_id,
+                    "--image-id",
+                    image_id,
+                    "--global-image-capability-schema-version-name",
+                    global_version_name,
+                    "--schema-data",
+                    json.dumps(desired, separators=(",", ":")),
+                    "--freeform-tags",
+                    json.dumps(tags, separators=(",", ":")),
+                ]
+            ),
+            dict,
+            "image capability schema create response",
+        )
+        return schema_data(image_schema)
+    if len(image_schemas) > 1:
+        raise DeploymentError("image has multiple capability schemas")
+    image_schema_id = image_schemas[0].get("id")
+    if not isinstance(image_schema_id, str):
+        raise DeploymentError("image capability schema lacks an OCID")
+    image_schema = response_data(
+        oci.run(
+            [
+                "compute",
+                "image-capability-schema",
+                "get",
+                "--image-capability-schema-id",
+                image_schema_id,
+            ]
+        ),
+        dict,
+        "image capability schema response",
+    )
+    current = schema_data(image_schema)
+    mismatches = {
+        name: schema_default(current.get(name, {}))
+        for name, expected in REQUIRED_CAPABILITIES.items()
+        if schema_default(current.get(name, {})) != expected
+    }
+    if not mismatches:
+        return current
+    print("CAPABILITIES  Updating image capability schema")
+    updated = response_data(
+        oci.run(
+            [
+                "compute",
+                "image-capability-schema",
+                "update",
+                "--image-capability-schema-id",
+                image_schema_id,
+                "--schema-data",
+                json.dumps(
+                    capability_schema_payload({**base_schema, **current}),
+                    separators=(",", ":"),
+                ),
+                "--force",
+            ]
+        ),
+        dict,
+        "image capability schema update response",
+    )
+    return schema_data(updated)
+
+
+def validate_capabilities(args, oci, image_id, tags):
     globals_list = response_data(
         oci.run(["compute", "global-image-capability-schema", "list"]),
         list,
@@ -1138,9 +1232,8 @@ def validate_capabilities(oci, image_id):
         dict,
         "global capability schema version response",
     )
-    effective = {
-        name: schema_default(entry) for name, entry in schema_data(global_version).items()
-    }
+    base_schema = schema_data(global_version)
+    effective = {name: schema_default(entry) for name, entry in base_schema.items()}
     image_schemas = response_data(
         oci.run(
             [
@@ -1156,29 +1249,12 @@ def validate_capabilities(oci, image_id):
         list,
         "image capability schema response",
     )
-    if len(image_schemas) > 1:
-        raise DeploymentError("image has multiple capability schemas")
-    if image_schemas:
-        image_schema_id = image_schemas[0].get("id")
-        if not isinstance(image_schema_id, str):
-            raise DeploymentError("image capability schema lacks an OCID")
-        image_schema = response_data(
-            oci.run(
-                [
-                    "compute",
-                    "image-capability-schema",
-                    "get",
-                    "--image-capability-schema-id",
-                    image_schema_id,
-                ]
-            ),
-            dict,
-            "image capability schema response",
-        )
-        for name, entry in schema_data(image_schema).items():
-            value = schema_default(entry)
-            if value is not None:
-                effective[name] = value
+    for name, entry in ensure_image_capability_schema(
+        args, oci, image_id, version, base_schema, image_schemas, tags
+    ).items():
+        value = schema_default(entry)
+        if value is not None:
+            effective[name] = value
     mismatches = {
         name: effective.get(name)
         for name, expected in REQUIRED_CAPABILITIES.items()
@@ -1266,6 +1342,26 @@ def recoverable_instance(instance):
     return instance.get("lifecycle-state") not in ("TERMINATING", "TERMINATED")
 
 
+def cloud_init_user_data(public_key_path):
+    try:
+        public_key = Path(public_key_path).read_text(encoding="utf-8").strip()
+    except OSError as error:
+        raise DeploymentError(f"could not read SSH public key: {error}") from error
+    if "\n" in public_key or not public_key:
+        raise DeploymentError("SSH public key must contain exactly one key")
+    return (
+        "#cloud-config\n"
+        "users:\n"
+        "  - name: alarm\n"
+        "    lock_passwd: false\n"
+        "    sudo: ALL=(ALL) NOPASSWD:ALL\n"
+        "    ssh_authorized_keys:\n"
+        f"      - {public_key}\n"
+        "disable_root: true\n"
+        "ssh_pwauth: false\n"
+    )
+
+
 def launch_instance(args, oci, state, image_id, tags):
     recorded = state.data.get("resources", {}).get("instance", {})
     instance_id = recorded.get("id") if args.resume else None
@@ -1299,46 +1395,51 @@ def launch_instance(args, oci, state, image_id, tags):
         instance = get_instance(oci, instance_id)
     else:
         print(f"LAUNCH  Launching {args.instance_name} on {args.shape}")
-        instance = response_data(
-            oci.run(
-                [
-                    "compute",
-                    "instance",
-                    "launch",
-                    "--availability-domain",
-                    args.availability_domain,
-                    "--compartment-id",
-                    args.compartment_id,
-                    "--subnet-id",
-                    args.subnet_id,
-                    "--image-id",
-                    image_id,
-                    "--shape",
-                    args.shape,
-                    "--shape-config",
-                    json.dumps(
-                        {"ocpus": args.ocpus, "memoryInGBs": args.memory_gbs},
-                        separators=(",", ":"),
-                    ),
-                    "--launch-options",
-                    json.dumps(REQUIRED_LAUNCH_OPTIONS, separators=(",", ":")),
-                    "--boot-volume-size-in-gbs",
-                    str(args.boot_volume_gbs),
-                    "--ssh-authorized-keys-file",
-                    str(args.ssh_public_key),
-                    "--assign-public-ip",
-                    str(args.assign_public_ip).lower(),
-                    "--display-name",
-                    args.instance_name,
-                    "--freeform-tags",
-                    json.dumps(tags, separators=(",", ":")),
-                    "--opc-client-request-id",
-                    client_request_id(state, "launch-instance"),
-                ]
-            ),
-            dict,
-            "instance launch response",
-        )
+        with tempfile.TemporaryDirectory(prefix="archlinuxarm-oci-user-data.") as temp:
+            user_data = Path(temp) / "cloud-init.yaml"
+            user_data.write_text(
+                cloud_init_user_data(args.ssh_public_key), encoding="utf-8"
+            )
+            instance = response_data(
+                oci.run(
+                    [
+                        "compute",
+                        "instance",
+                        "launch",
+                        "--availability-domain",
+                        args.availability_domain,
+                        "--compartment-id",
+                        args.compartment_id,
+                        "--subnet-id",
+                        args.subnet_id,
+                        "--image-id",
+                        image_id,
+                        "--shape",
+                        args.shape,
+                        "--shape-config",
+                        json.dumps(
+                            {"ocpus": args.ocpus, "memoryInGBs": args.memory_gbs},
+                            separators=(",", ":"),
+                        ),
+                        "--boot-volume-size-in-gbs",
+                        str(args.boot_volume_gbs),
+                        "--ssh-authorized-keys-file",
+                        str(args.ssh_public_key),
+                        "--user-data-file",
+                        str(user_data),
+                        "--assign-public-ip",
+                        str(args.assign_public_ip).lower(),
+                        "--display-name",
+                        args.instance_name,
+                        "--freeform-tags",
+                        json.dumps(tags, separators=(",", ":")),
+                        "--opc-client-request-id",
+                        client_request_id(state, "launch-instance"),
+                    ]
+                ),
+                dict,
+                "instance launch response",
+            )
         instance_id = instance.get("id")
         if not isinstance(instance_id, str):
             raise DeploymentError("instance launch response lacks an OCID")
@@ -1393,7 +1494,7 @@ def verify_ssh(args, addresses, state):
             "cloud-init status --wait --long",
             "sudo -n true",
             "test $(sudo passwd -S root | awk '{print $2}') = L",
-            "test $(sudo passwd -S alarm | awk '{print $2}') = L",
+            "test $(sudo passwd -S alarm | awk '{print $2}') != L",
             "systemctl is-active systemd-networkd.service systemd-resolved.service "
             "sshd.service nftables.service sshguard.service",
             "test -e /var/lib/oci-root-grown",
@@ -1464,23 +1565,23 @@ def cleanup_object(args, oci, state, namespace, bucket, object_name):
 
 
 def bucket_object_names(oci, namespace, bucket):
-    response = response_data(
-        oci.run(
-            [
-                "os",
-                "object",
-                "list",
-                "--namespace",
-                namespace,
-                "--bucket-name",
-                bucket,
-                "--all",
-            ],
-            empty_data={"objects": []},
-        ),
-        dict,
-        "object list response",
+    response = oci.run(
+        [
+            "os",
+            "object",
+            "list",
+            "--namespace",
+            namespace,
+            "--bucket-name",
+            bucket,
+            "--all",
+        ],
+        empty_data={"objects": []},
     )
+    if "data" in response:
+        response = response_data(response, dict, "object list response")
+    else:
+        response = require_object(response, "object list response")
     objects = response.get("objects", [])
     if not isinstance(objects, list):
         raise DeploymentError("object list response has invalid objects")
@@ -1987,7 +2088,7 @@ def deploy(args):
         image_id, _image = create_image(
             args, oci, state, namespace, bucket, object_name, tags
         )
-        capabilities = validate_capabilities(oci, image_id)
+        capabilities = validate_capabilities(args, oci, image_id, tags)
         ensure_shape_compatibility(oci, image_id, args.shape, state)
         state.resource("image", capabilities=capabilities, compatible_shape=args.shape)
         state.update(phase="image-ready")

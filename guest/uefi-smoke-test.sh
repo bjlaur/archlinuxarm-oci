@@ -34,7 +34,7 @@ else
     [[ "$image_user" == alarm ]]
     ! getent passwd arch >/dev/null
     [[ "$(passwd -S root | awk '{print $2}')" == L ]]
-    [[ "$(passwd -S alarm | awk '{print $2}')" == L ]]
+    [[ "$(passwd -S alarm | awk '{print $2}')" != L ]]
     # cloud-final.service has already completed because the smoke unit Requires
     # and orders itself after it. Do not use --wait here: cloud-init's status
     # waiter can block when this service is the explicitly selected boot target.

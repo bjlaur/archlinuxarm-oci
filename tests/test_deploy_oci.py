@@ -673,7 +673,12 @@ class ShapeAndLifecycleTests(unittest.TestCase):
 class CapabilityTests(unittest.TestCase):
     def global_responses(self, image_schema=None):
         global_data = {
-            key: {"default-value": value}
+            key: {
+                "default-value": value,
+                "descriptor-type": "enumstring",
+                "source": "GLOBAL",
+                "values": [value],
+            }
             for key, value in deploy.REQUIRED_CAPABILITIES.items()
         }
         responses = [
@@ -685,17 +690,37 @@ class CapabilityTests(unittest.TestCase):
             responses.append({"data": {"schema-data": image_schema}})
         return responses
 
-    def test_global_capabilities_are_accepted(self):
-        oci = SequenceOCI(self.global_responses())
-        result = deploy.validate_capabilities(oci, "image")
-        self.assertEqual(result, deploy.REQUIRED_CAPABILITIES)
-
-    def test_incompatible_image_override_is_rejected(self):
+    def test_missing_image_capability_schema_is_created(self):
         oci = SequenceOCI(
-            self.global_responses({"Compute.Firmware": {"default-value": "BIOS"}})
+            self.global_responses()
+            + [{"data": {"schema-data": self.global_responses()[1]["data"]["schema-data"]}}]
         )
-        with self.assertRaisesRegex(deploy.DeploymentError, "Compute.Firmware"):
-            deploy.validate_capabilities(oci, "image")
+        result = deploy.validate_capabilities(
+            valid_args(), oci, "image", {"tag": "value"}
+        )
+        self.assertEqual(result, deploy.REQUIRED_CAPABILITIES)
+        create = oci.calls[3][0]
+        self.assertEqual(create[:3], ["compute", "image-capability-schema", "create"])
+        schema = json.loads(create[create.index("--schema-data") + 1])
+        self.assertEqual(schema["Compute.Firmware"]["defaultValue"], "UEFI_64")
+
+    def test_incompatible_image_override_is_updated(self):
+        updated = {
+            key: {"defaultValue": value}
+            for key, value in deploy.REQUIRED_CAPABILITIES.items()
+        }
+        oci = SequenceOCI(
+            self.global_responses(
+                {"Compute.Firmware": {"default-value": "BIOS"}}
+            )
+            + [{"data": {"schema-data": updated}}]
+        )
+        result = deploy.validate_capabilities(
+            valid_args(), oci, "image", {"tag": "value"}
+        )
+        self.assertEqual(result, deploy.REQUIRED_CAPABILITIES)
+        update = oci.calls[4][0]
+        self.assertEqual(update[:3], ["compute", "image-capability-schema", "update"])
 
     def test_shape_compatibility_adds_only_when_missing(self):
         oci = SequenceOCI(
@@ -843,6 +868,10 @@ class ObjectSafetyTests(unittest.TestCase):
         with self.assertRaisesRegex(deploy.DeploymentError, "non-empty bucket"):
             deploy.cleanup_bucket(args, oci, state, "ns", "bucket")
 
+    def test_bucket_object_names_accepts_bare_empty_list_response(self):
+        oci = SequenceOCI([{"prefixes": []}])
+        self.assertEqual(deploy.bucket_object_names(oci, "ns", "bucket"), [])
+
 
 class CleanDeploymentTests(unittest.TestCase):
     def write_state(self, path):
@@ -940,6 +969,13 @@ class MutationCommandTests(unittest.TestCase):
             {"deployment_id": str(deploy.uuid.uuid4()), "resources": {}}
         )
 
+    def ssh_public_key(self, directory):
+        key = Path(directory) / "key.pub"
+        key.write_text(
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEYdU6aY7SBVn3fnVPoknHLghaHffieYYPuJ0a1PUKiT test\n"
+        )
+        return key
+
     def test_image_import_command_is_explicit_and_records_ocid(self):
         args = mock.Mock(
             resume=False,
@@ -954,120 +990,132 @@ class MutationCommandTests(unittest.TestCase):
                 {"data": {"id": "image-id", "lifecycle-state": "AVAILABLE"}},
             ]
         )
-        image_id, _ = deploy.create_image(
-            args, oci, state, "namespace", "bucket", "image.qcow2", {"tag": "value"}
-        )
+        with mock.patch("sys.stdout", new_callable=io.StringIO) as output:
+            image_id, _ = deploy.create_image(
+                args, oci, state, "namespace", "bucket", "image.qcow2", {"tag": "value"}
+            )
         command = oci.calls[0][0]
         self.assertEqual(image_id, "image-id")
+        self.assertIn("may take several minutes", output.getvalue())
         self.assertEqual(command[:4], ["compute", "image", "import", "from-object"])
         self.assertEqual(command[command.index("--source-image-type") + 1], "QCOW2")
         self.assertEqual(command[command.index("--launch-mode") + 1], "PARAVIRTUALIZED")
         self.assertIn("--opc-client-request-id", command)
 
+    def test_cloud_init_user_data_installs_alarm_key(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            user_data = deploy.cloud_init_user_data(self.ssh_public_key(temporary))
+        self.assertIn("name: alarm", user_data)
+        self.assertIn("ssh_authorized_keys:", user_data)
+        self.assertIn(
+            "AAAAC3NzaC1lZDI1NTE5AAAAIEYdU6aY7SBVn3fnVPoknHLghaHffieYYPuJ0a1PUKiT",
+            user_data,
+        )
+
     def test_instance_launch_command_contains_only_public_ssh_key_path(self):
-        args = mock.Mock(
-            resume=False,
-            instance_name="instance",
-            compartment_id=COMPARTMENT,
-            subnet_id=SUBNET,
-            availability_domain="test:AD-1",
-            shape=deploy.DEFAULT_SHAPE,
-            ocpus=1.0,
-            memory_gbs=6.0,
-            boot_volume_gbs=50,
-            ssh_public_key=Path("/keys/public.pub"),
-            assign_public_ip=False,
-            instance_timeout=30,
-        )
-        state = self.state()
-        oci = SequenceOCI(
-            [
-                {"data": {"id": "instance-id", "lifecycle-state": "PROVISIONING"}},
-                {"data": {"id": "instance-id", "lifecycle-state": "RUNNING"}},
-            ]
-        )
-        instance_id, _ = deploy.launch_instance(
-            args, oci, state, "image-id", {"tag": "value"}
-        )
+        with tempfile.TemporaryDirectory() as temporary:
+            args = mock.Mock(
+                resume=False,
+                instance_name="instance",
+                compartment_id=COMPARTMENT,
+                subnet_id=SUBNET,
+                availability_domain="test:AD-1",
+                shape=deploy.DEFAULT_SHAPE,
+                ocpus=1.0,
+                memory_gbs=6.0,
+                boot_volume_gbs=50,
+                ssh_public_key=self.ssh_public_key(temporary),
+                assign_public_ip=False,
+                instance_timeout=30,
+            )
+            state = self.state()
+            oci = SequenceOCI(
+                [
+                    {"data": {"id": "instance-id", "lifecycle-state": "PROVISIONING"}},
+                    {"data": {"id": "instance-id", "lifecycle-state": "RUNNING"}},
+                ]
+            )
+            instance_id, _ = deploy.launch_instance(
+                args, oci, state, "image-id", {"tag": "value"}
+            )
         command = oci.calls[0][0]
         self.assertEqual(instance_id, "instance-id")
         self.assertEqual(
             command[command.index("--ssh-authorized-keys-file") + 1],
-            "/keys/public.pub",
+            str(args.ssh_public_key),
         )
-        launch_options = json.loads(command[command.index("--launch-options") + 1])
-        self.assertEqual(launch_options["firmware"], "UEFI_64")
-        self.assertEqual(launch_options["networkType"], "PARAVIRTUALIZED")
-        self.assertEqual(launch_options["bootVolumeType"], "PARAVIRTUALIZED")
-        self.assertEqual(launch_options["remoteDataVolumeType"], "PARAVIRTUALIZED")
+        self.assertIn("--user-data-file", command)
+        self.assertNotIn("--launch-options", command)
         self.assertEqual(command[command.index("--assign-public-ip") + 1], "false")
         self.assertNotIn("private", " ".join(str(part) for part in command))
         self.assertIn("--opc-client-request-id", command)
 
     def test_resume_launches_when_empty_instance_list_has_empty_stdout(self):
-        args = mock.Mock(
-            resume=True,
-            instance_name="instance",
-            compartment_id=COMPARTMENT,
-            subnet_id=SUBNET,
-            availability_domain="test:AD-1",
-            shape=deploy.DEFAULT_SHAPE,
-            ocpus=1.0,
-            memory_gbs=6.0,
-            boot_volume_gbs=50,
-            ssh_public_key=Path("/keys/public.pub"),
-            assign_public_ip=False,
-            instance_timeout=30,
-        )
-        state = self.state()
-        oci = SequenceOCI(
-            [
-                {"data": []},
-                {"data": {"id": "instance-id", "lifecycle-state": "PROVISIONING"}},
-                {"data": {"id": "instance-id", "lifecycle-state": "RUNNING"}},
-            ]
-        )
-        instance_id, _ = deploy.launch_instance(
-            args, oci, state, "image-id", {"tag": "value"}
-        )
+        with tempfile.TemporaryDirectory() as temporary:
+            args = mock.Mock(
+                resume=True,
+                instance_name="instance",
+                compartment_id=COMPARTMENT,
+                subnet_id=SUBNET,
+                availability_domain="test:AD-1",
+                shape=deploy.DEFAULT_SHAPE,
+                ocpus=1.0,
+                memory_gbs=6.0,
+                boot_volume_gbs=50,
+                ssh_public_key=self.ssh_public_key(temporary),
+                assign_public_ip=False,
+                instance_timeout=30,
+            )
+            state = self.state()
+            oci = SequenceOCI(
+                [
+                    {"data": []},
+                    {"data": {"id": "instance-id", "lifecycle-state": "PROVISIONING"}},
+                    {"data": {"id": "instance-id", "lifecycle-state": "RUNNING"}},
+                ]
+            )
+            instance_id, _ = deploy.launch_instance(
+                args, oci, state, "image-id", {"tag": "value"}
+            )
         self.assertEqual(instance_id, "instance-id")
         self.assertEqual(oci.calls[0][0][:3], ["compute", "instance", "list"])
         self.assertEqual(oci.calls[0][1]["empty_data"], [])
         self.assertEqual(oci.calls[1][0][:3], ["compute", "instance", "launch"])
 
     def test_resume_ignores_terminated_tagged_instances(self):
-        args = mock.Mock(
-            resume=True,
-            instance_name="instance",
-            compartment_id=COMPARTMENT,
-            subnet_id=SUBNET,
-            availability_domain="test:AD-1",
-            shape=deploy.DEFAULT_SHAPE,
-            ocpus=1.0,
-            memory_gbs=6.0,
-            boot_volume_gbs=50,
-            ssh_public_key=Path("/keys/public.pub"),
-            assign_public_ip=False,
-            instance_timeout=30,
-        )
-        tags = {"deployment": "one"}
-        state = self.state()
-        oci = SequenceOCI(
-            [
-                {
-                    "data": [
-                        {
-                            "id": "old-instance",
-                            "lifecycle-state": "TERMINATED",
-                            "freeform-tags": tags,
-                        }
-                    ]
-                },
-                {"data": {"id": "instance-id", "lifecycle-state": "PROVISIONING"}},
-                {"data": {"id": "instance-id", "lifecycle-state": "RUNNING"}},
-            ]
-        )
-        instance_id, _ = deploy.launch_instance(args, oci, state, "image-id", tags)
+        with tempfile.TemporaryDirectory() as temporary:
+            args = mock.Mock(
+                resume=True,
+                instance_name="instance",
+                compartment_id=COMPARTMENT,
+                subnet_id=SUBNET,
+                availability_domain="test:AD-1",
+                shape=deploy.DEFAULT_SHAPE,
+                ocpus=1.0,
+                memory_gbs=6.0,
+                boot_volume_gbs=50,
+                ssh_public_key=self.ssh_public_key(temporary),
+                assign_public_ip=False,
+                instance_timeout=30,
+            )
+            tags = {"deployment": "one"}
+            state = self.state()
+            oci = SequenceOCI(
+                [
+                    {
+                        "data": [
+                            {
+                                "id": "old-instance",
+                                "lifecycle-state": "TERMINATED",
+                                "freeform-tags": tags,
+                            }
+                        ]
+                    },
+                    {"data": {"id": "instance-id", "lifecycle-state": "PROVISIONING"}},
+                    {"data": {"id": "instance-id", "lifecycle-state": "RUNNING"}},
+                ]
+            )
+            instance_id, _ = deploy.launch_instance(args, oci, state, "image-id", tags)
         self.assertEqual(instance_id, "instance-id")
         self.assertEqual(oci.calls[1][0][:3], ["compute", "instance", "launch"])
 

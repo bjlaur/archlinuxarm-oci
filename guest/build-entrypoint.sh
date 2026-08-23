@@ -48,7 +48,7 @@ if [[ "$build_mode" == development ]]; then
 else
     [[ "$image_user" == alarm ]]
     [[ "$(passwd -S root | awk '{print $2}')" == L ]]
-    [[ "$(passwd -S alarm | awk '{print $2}')" == L ]]
+    [[ "$(passwd -S alarm | awk '{print $2}')" != L ]]
     [[ "$(id -u alarm)" == 1000 ]]
     id -nG alarm | tr ' ' '\n' | grep -Fxq wheel
     [[ "$(getent passwd alarm | cut -d: -f7)" == /bin/bash ]]

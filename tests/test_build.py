@@ -18,7 +18,7 @@ class TerminalBuffer(io.StringIO):
         return True
 
 
-def factory_inspection(*, shadow: str = "root:!:1::::::\nalarm:!:1::::::\n"):
+def factory_inspection(*, shadow: str = "root:!:1::::::\nalarm:$6$usable:1::::::\n"):
     required = {
         "/usr/bin/cloud-init",
         "/usr/lib/systemd/system-generators/cloud-init-generator",
@@ -517,16 +517,22 @@ class ArchiveTests(unittest.TestCase):
             self.assertNotIn("PRIVATE KEY", user_data)
             self.assertFalse(any("private" in path.name.lower() for path in Path(directory).rglob("*")))
 
-    def test_factory_validation_enforces_locked_keyless_cloud_image(self):
+    def test_factory_validation_enforces_console_recovery_account(self):
         builder = build.Builder(build.parse_args(["--factory-image"]))
         builder.admin_user = "alarm"
         builder.validate_built_image(factory_inspection())
 
-        unlocked = factory_inspection(
+        unlocked_root = factory_inspection(
             shadow="root:$6$usable:1::::::\nalarm:!:1::::::\n"
         )
-        with self.assertRaisesRegex(RuntimeError, "passwords must be locked"):
-            builder.validate_built_image(unlocked)
+        with self.assertRaisesRegex(RuntimeError, "root password must be locked"):
+            builder.validate_built_image(unlocked_root)
+
+        locked_alarm = factory_inspection(
+            shadow="root:!:1::::::\nalarm:!:1::::::\n"
+        )
+        with self.assertRaisesRegex(RuntimeError, "alarm password must remain usable"):
+            builder.validate_built_image(locked_alarm)
 
     def test_completed_image_inspection_uses_one_guestfish_session(self):
         builder = build.Builder(build.parse_args(["--factory-image"]))

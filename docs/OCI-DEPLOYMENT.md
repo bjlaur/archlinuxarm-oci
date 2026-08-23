@@ -107,7 +107,7 @@ to the new volume size.
 
 - cloud-init completion;
 - passwordless sudo;
-- locked root and `alarm` passwords;
+- locked root password, usable `alarm` console password, and disabled SSH password authentication;
 - networking, SSH, nftables, and SSHGuard services; and
 - successful root-filesystem expansion.
 
@@ -154,8 +154,9 @@ lsblk -f
 df -hT /
 ```
 
-The root and `alarm` password status should be locked, the services should be
-active, and `/` should occupy nearly the selected boot-volume size.
+The root password status should be locked, the `alarm` password should remain
+usable for console recovery, the services should be active, and `/` should
+occupy nearly the selected boot-volume size.
 
 The instance is now ready for normal Arch Linux ARM administration.
 
@@ -264,11 +265,12 @@ community-tested rather than Oracle-supported.
 
 ### Security model
 
-The published factory image contains no usable password, baked-in SSH key,
-persistent host key, machine identity, or retained cloud-init state. OCI passes
-the selected public key in instance metadata; cloud-init installs it for the
-existing `alarm` account. Root SSH and SSH password authentication remain
-disabled.
+The published factory image contains no usable root password, baked-in SSH key,
+persistent host key, machine identity, or retained cloud-init state. The
+upstream `alarm` console password remains available for emergency console
+recovery. OCI passes the selected public key in instance metadata; cloud-init
+installs it for the existing `alarm` account. Root SSH and SSH password
+authentication remain disabled.
 
 ### Troubleshooting
 

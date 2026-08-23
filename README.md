@@ -107,11 +107,11 @@ ext4 filesystem when the instance uses a larger OCI boot volume.
 | Account | Console password | SSH | sudo |
 | --- | --- | --- | --- |
 | `root` | locked | disabled | n/a |
-| `alarm` | locked | OCI-provided public key only | passwordless |
+| `alarm` | `alarm` | OCI-provided public key only | passwordless |
 
 Published factory images contain:
 
-- no usable user or root password;
+- no usable root password;
 - no baked-in authorized SSH key;
 - no persistent SSH host keys;
 - no machine identity or random seed; and

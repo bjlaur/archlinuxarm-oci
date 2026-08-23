@@ -984,12 +984,14 @@ class Builder:
                 for line in shadow.splitlines()
                 if len(fields := line.split(":")) >= 2 and fields[0] in {"root", FACTORY_USER}
             }
-            if set(hashes) != {"root", FACTORY_USER} or any(
-                not value.startswith(("!", "*")) for value in hashes.values()
-            ):
-                raise RuntimeError("factory root and alarm passwords must be locked")
+            if set(hashes) != {"root", FACTORY_USER}:
+                raise RuntimeError("factory root and alarm password entries must exist")
+            if not hashes["root"].startswith(("!", "*")):
+                raise RuntimeError("factory root password must be locked")
+            if hashes[FACTORY_USER].startswith(("!", "*")):
+                raise RuntimeError("factory alarm password must remain usable for console recovery")
             cloud_cfg = inspection.files["/etc/cloud/cloud.cfg.d/90-oci-alarm.cfg"]
-            if "name: alarm" not in cloud_cfg or "lock_passwd: true" not in cloud_cfg:
+            if "name: alarm" not in cloud_cfg or "lock_passwd: false" not in cloud_cfg:
                 raise RuntimeError("factory image is missing the alarm cloud-init override")
             sudoers = inspection.files["/etc/sudoers.d/20-alarm-cloud"]
             if "alarm ALL=(ALL:ALL) NOPASSWD: ALL" not in sudoers:

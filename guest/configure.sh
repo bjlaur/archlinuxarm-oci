@@ -44,7 +44,6 @@ if [[ "$build_mode" == factory ]]; then
     getent passwd alarm >/dev/null
     usermod -s /bin/bash -aG wheel alarm
     passwd -l root
-    passwd -l alarm
 else
     if getent passwd "$image_user" >/dev/null; then
         echo "requested admin username already belongs to an existing system account: $image_user" >&2
