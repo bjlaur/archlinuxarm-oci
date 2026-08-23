@@ -1,5 +1,9 @@
 # Arch Linux ARM for Oracle Cloud Infrastructure
 
+**Experimental: This project works well for my personal use, but it has not
+been extensively tested across different OCI configurations. Bug reports,
+feedback, and pull requests are welcome.**
+
 Community-built Arch Linux ARM AArch64 images for Oracle Cloud Infrastructure
 Ampere A1 (`VM.Standard.A1.Flex`). The images start from the signed official
 Arch Linux ARM generic AArch64 root filesystem.
