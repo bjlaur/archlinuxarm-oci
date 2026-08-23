@@ -131,6 +131,30 @@ def positive_float(value):
     return parsed
 
 
+def validate_state_data(data):
+    if not isinstance(data, dict):
+        raise DeploymentError("state file must contain a JSON object")
+    if data.get("schema_version") != STATE_SCHEMA_VERSION:
+        raise DeploymentError("state file uses an unsupported schema version")
+    deployment_id = data.get("deployment_id")
+    try:
+        uuid.UUID(deployment_id)
+    except (AttributeError, TypeError, ValueError) as error:
+        raise DeploymentError("state file has an invalid deployment ID") from error
+    resources = data.get("resources")
+    if not isinstance(resources, dict):
+        raise DeploymentError("state file resources are invalid")
+    if any(
+        not isinstance(name, str) or not isinstance(record, dict)
+        for name, record in resources.items()
+    ):
+        raise DeploymentError("state file contains an invalid resource record")
+    for name in ("inputs", "release"):
+        if name in data and not isinstance(data[name], dict):
+            raise DeploymentError(f"state file {name} section is invalid")
+    return data
+
+
 class StateFile:
     def __init__(self, path, resume=False):
         self.path = Path(path).expanduser().resolve()
@@ -143,8 +167,7 @@ class StateFile:
                 self.data = json.loads(self.path.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError) as error:
                 raise DeploymentError(f"could not read state file: {error}") from error
-            if self.data.get("schema_version") != STATE_SCHEMA_VERSION:
-                raise DeploymentError("state file uses an unsupported schema version")
+            validate_state_data(self.data)
             self.loaded = True
         else:
             if resume:
@@ -996,13 +1019,16 @@ def lifecycle_value(resource, description):
 
 def wait_for_resource(getter, active_states, success_state, timeout, description):
     started = time.monotonic()
+    deadline = started + timeout
     delay = 10
     progress_interval = 60
     last_state = None
     last_reported = started
     while True:
-        now = time.monotonic()
+        if time.monotonic() >= deadline:
+            raise DeploymentError(f"timed out waiting for {description} to reach {success_state}")
         resource = getter()
+        now = time.monotonic()
         state = lifecycle_value(resource, description)
         elapsed = int(now - started)
         if state != last_state or now - last_reported >= progress_interval:
@@ -1013,9 +1039,10 @@ def wait_for_resource(getter, active_states, success_state, timeout, description
             return resource
         if state not in active_states:
             raise DeploymentError(f"{description} entered unexpected state {state}")
-        if now - started >= timeout:
+        remaining = deadline - now
+        if remaining <= 0:
             raise DeploymentError(f"timed out waiting for {description} to reach {success_state}")
-        time.sleep(delay)
+        time.sleep(min(delay, remaining))
         delay = min(30, delay + 5)
 
 
@@ -1544,7 +1571,15 @@ def verify_ssh(args, addresses, state):
     deadline = time.monotonic() + args.ssh_timeout
     print_status("SSH-CHECK", f"Waiting for alarm@{address}")
     while True:
-        completed = subprocess.run(command, check=False)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise DeploymentError("timed out waiting for successful SSH verification")
+        try:
+            completed = subprocess.run(command, check=False, timeout=remaining)
+        except subprocess.TimeoutExpired as error:
+            raise DeploymentError(
+                "timed out waiting for successful SSH verification"
+            ) from error
         if completed.returncode == 0:
             state.resource("ssh_verification", passed=True, address=address)
             return
@@ -1552,9 +1587,10 @@ def verify_ssh(args, addresses, state):
             raise DeploymentError(
                 f"SSH connected but guest verification failed with status {completed.returncode}"
             )
-        if time.monotonic() >= deadline:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
             raise DeploymentError("timed out waiting for successful SSH verification")
-        time.sleep(15)
+        time.sleep(min(15, remaining))
 
 
 def cleanup_object(args, oci, state, namespace, bucket, object_name):

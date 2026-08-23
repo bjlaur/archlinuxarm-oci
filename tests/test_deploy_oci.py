@@ -433,6 +433,34 @@ class StateTests(unittest.TestCase):
             self.assertTrue(resumed.loaded)
             self.assertEqual(resumed.data["phase"], "tested")
 
+    def test_state_rejects_invalid_document_shapes(self):
+        invalid_documents = (
+            [],
+            {"schema_version": deploy.STATE_SCHEMA_VERSION},
+            {
+                "schema_version": deploy.STATE_SCHEMA_VERSION,
+                "deployment_id": "not-a-uuid",
+                "resources": {},
+            },
+            {
+                "schema_version": deploy.STATE_SCHEMA_VERSION,
+                "deployment_id": str(deploy.uuid.uuid4()),
+                "resources": [],
+            },
+            {
+                "schema_version": deploy.STATE_SCHEMA_VERSION,
+                "deployment_id": str(deploy.uuid.uuid4()),
+                "resources": {"instance": "not-an-object"},
+            },
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "state.json"
+            for document in invalid_documents:
+                with self.subTest(document=document):
+                    path.write_text(json.dumps(document))
+                    with self.assertRaises(deploy.DeploymentError):
+                        deploy.StateFile(path, resume=True)
+
     def test_state_refuses_implicit_overwrite(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "state.json"
@@ -625,7 +653,7 @@ class ShapeAndLifecycleTests(unittest.TestCase):
                 {"lifecycle-state": "AVAILABLE", "id": "image"},
             ]
         )
-        clock = iter([0, 0, 1, 1])
+        clock = iter([0, 0, 0, 1, 1])
         with (
             mock.patch.object(deploy.time, "monotonic", side_effect=lambda: next(clock)),
             mock.patch.object(deploy.time, "sleep"),
@@ -645,7 +673,7 @@ class ShapeAndLifecycleTests(unittest.TestCase):
                 {"lifecycle-state": "AVAILABLE", "id": "image"},
             ]
         )
-        times = iter([0, 0, 30, 65, 65, 90])
+        times = iter([0, 0, 0, 30, 30, 65, 65, 65, 65])
         with (
             mock.patch.object(deploy.time, "monotonic", side_effect=lambda: next(times)),
             mock.patch.object(deploy.time, "sleep"),
@@ -668,6 +696,46 @@ class ShapeAndLifecycleTests(unittest.TestCase):
                 30,
                 "image",
             )
+
+    def test_waiter_does_not_sleep_past_deadline(self):
+        with (
+            mock.patch.object(deploy.time, "monotonic", side_effect=[0, 0, 2]),
+            mock.patch.object(deploy.time, "sleep") as sleep,
+            mock.patch("sys.stdout", new_callable=io.StringIO),
+            self.assertRaisesRegex(deploy.DeploymentError, "timed out"),
+        ):
+            deploy.wait_for_resource(
+                lambda: {"lifecycle-state": "IMPORTING"},
+                {"IMPORTING"},
+                "AVAILABLE",
+                1,
+                "image",
+            )
+        sleep.assert_not_called()
+
+    def test_ssh_waiter_does_not_sleep_past_deadline(self):
+        args = mock.Mock(
+            verify_ssh=True,
+            ssh_private_key=Path(__file__),
+            ssh_connect_timeout=1,
+            ssh_timeout=1,
+        )
+        state = mock.Mock()
+        state.path = Path("state.json")
+        with (
+            mock.patch.object(deploy.time, "monotonic", side_effect=[0, 0, 2]),
+            mock.patch.object(deploy.time, "sleep") as sleep,
+            mock.patch.object(
+                deploy.subprocess,
+                "run",
+                return_value=deploy.subprocess.CompletedProcess([], 255),
+            ) as run,
+            mock.patch("sys.stdout", new_callable=io.StringIO),
+            self.assertRaisesRegex(deploy.DeploymentError, "timed out"),
+        ):
+            deploy.verify_ssh(args, {"private_ip": "192.0.2.1"}, state)
+        sleep.assert_not_called()
+        self.assertEqual(run.call_args.kwargs["timeout"], 1)
 
 
 class CapabilityTests(unittest.TestCase):

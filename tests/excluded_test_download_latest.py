@@ -81,6 +81,41 @@ class DownloadLatestTests(unittest.TestCase):
                 (destination / f"{image}.sha256").read_bytes(), checksum_asset
             )
 
+    def test_main_does_not_replace_image_created_during_download(self):
+        image = "test.qcow2"
+        contents = b"downloaded image"
+        checksum = download_latest.hashlib.sha256(contents).hexdigest()
+        metadata = json.dumps(
+            {"image_filename": image, "image_sha256": checksum}
+        ).encode()
+        checksum_asset = f"{checksum}  {image}\n".encode()
+
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "downloads"
+
+            def racing_download(_asset, target_directory):
+                (target_directory / image).write_bytes(b"racing writer")
+                temporary = target_directory / ".image.part"
+                temporary.write_bytes(contents)
+                return temporary, checksum
+
+            with (
+                mock.patch.object(
+                    download_latest,
+                    "fetch",
+                    side_effect=[metadata, checksum_asset],
+                ),
+                mock.patch.object(download_latest, "download_image", racing_download),
+                mock.patch.object(download_latest.shutil, "which", return_value="/usr/bin/curl"),
+                mock.patch("sys.stdout", new=io.StringIO()),
+                self.assertRaises(FileExistsError),
+            ):
+                download_latest.main([str(destination)])
+
+            self.assertEqual((destination / image).read_bytes(), b"racing writer")
+            self.assertFalse((destination / "build-info.json").exists())
+            self.assertFalse((destination / f"{image}.sha256").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

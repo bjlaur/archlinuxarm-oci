@@ -1245,12 +1245,15 @@ class Builder:
         )
         os.close(descriptor)
         temporary = Path(temporary_name)
-        run([
-            "qemu-img", "convert", "-p", "-f", "raw", "-O", "qcow2", "-c",
-            "-o", "compression_type=zstd", self.raw, temporary,
-        ])
-        run(["qemu-img", "check", "-f", "qcow2", temporary])
-        os.replace(temporary, self.output)
+        try:
+            run([
+                "qemu-img", "convert", "-p", "-f", "raw", "-O", "qcow2", "-c",
+                "-o", "compression_type=zstd", self.raw, temporary,
+            ])
+            run(["qemu-img", "check", "-f", "qcow2", temporary])
+            os.replace(temporary, self.output)
+        finally:
+            temporary.unlink(missing_ok=True)
         run(["qemu-img", "info", "-f", "qcow2", self.output])
         digest = self.image_sha256(self.output)
         state = self.record_conversion(digest)

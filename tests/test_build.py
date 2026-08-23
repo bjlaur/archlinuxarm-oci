@@ -378,6 +378,27 @@ class ArchiveTests(unittest.TestCase):
             self.assertEqual(metadata["build_mode"], "development")
             self.assertEqual(metadata["image_user"], "tester")
 
+    def test_failed_conversion_removes_partial_output(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            builder = build.Builder(build.parse_args([
+                "--work-dir", str(base), "--convert-only",
+                "--output", str(base / "output.qcow2"),
+            ]))
+            builder.start_workspace(resume=True)
+            assert builder.raw is not None
+            builder.raw.write_bytes(b"raw-image")
+            with (
+                mock.patch.object(
+                    build,
+                    "run",
+                    side_effect=build.subprocess.CalledProcessError(1, ["qemu-img"]),
+                ),
+                self.assertRaises(build.subprocess.CalledProcessError),
+            ):
+                builder.convert()
+            self.assertEqual(list(base.glob("output.qcow2.*.partial")), [])
+
     def test_exact_work_directory_is_retained(self):
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory) / "exact-workspace"

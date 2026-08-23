@@ -115,6 +115,11 @@ def write_new(path: Path, contents: bytes) -> None:
         output.write(contents)
 
 
+def publish_new(source: Path, destination: Path) -> None:
+    os.link(source, destination)
+    source.unlink()
+
+
 def parse_args(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -165,7 +170,7 @@ def main(argv=None) -> int:
         created.append(destination / "build-info.json")
         write_new(destination / checksum_name, checksum_contents)
         created.append(destination / checksum_name)
-        temporary.rename(destination / image)
+        publish_new(temporary, destination / image)
     except BaseException:
         temporary.unlink(missing_ok=True)
         for path in created:
