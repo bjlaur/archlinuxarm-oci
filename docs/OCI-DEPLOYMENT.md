@@ -198,9 +198,17 @@ cleanup manifest:
 
 `--clean` terminates the recorded instance and deletes its boot volume, deletes
 the recorded custom image, deletes the recorded uploaded object, aborts pending
-multipart uploads in the recorded bucket, deletes the bucket only if it is
-empty, and removes `.deploy-oci-state.json` after successful cleanup. It does
-not discover or delete unrelated OCI resources.
+multipart uploads, and deletes active pre-authenticated requests before deleting
+a bucket created by the deployment. It deletes the bucket only if it is empty,
+then removes `.deploy-oci-state.json` after successful cleanup. Cleanup is
+restartable: after interruption or an OCI error, rerun the same `--clean`
+command with the same state file. It does not discover or delete unrelated OCI
+resources.
+
+The first Ctrl-C requests a graceful stop. The deployer lets the active OCI CLI
+command finish, saves its returned resource state, and exits at the next safe
+checkpoint. A second Ctrl-C stops immediately and can leave an OCI request in
+an ambiguous state.
 
 ## More things you should know
 

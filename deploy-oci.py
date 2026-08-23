@@ -49,6 +49,8 @@ DELETING_INSTANCE_STATES = {
     "TERMINATING",
 }
 OCID_RE = re.compile(r"^ocid1\.[a-z0-9-]+\.oc[0-9]*\.[a-z0-9-]*\.[A-Za-z0-9._-]+$")
+_PENDING_SIGNAL = None
+_INTERRUPT_STATE = None
 
 
 class DeploymentError(RuntimeError):
@@ -189,6 +191,7 @@ class StateFile:
         self.data.update(values)
         self.data["updated_at"] = timestamp()
         self.write()
+        interrupt_checkpoint()
 
     def resource(self, resource_name, **values):
         resources = self.data.setdefault("resources", {})
@@ -196,6 +199,7 @@ class StateFile:
         current.update(values)
         self.data["updated_at"] = timestamp()
         self.write()
+        interrupt_checkpoint()
 
     def record_failure(self, error):
         self.data["failure"] = {
@@ -262,6 +266,7 @@ class OCIRunner:
             text=True,
             stdout=None if passthrough else subprocess.PIPE,
             stderr=None if passthrough else subprocess.PIPE,
+            start_new_session=True,
         )
         if completed.returncode:
             raise OCIError(command, completed.returncode, completed.stderr or "")
@@ -1025,9 +1030,11 @@ def wait_for_resource(getter, active_states, success_state, timeout, description
     last_state = None
     last_reported = started
     while True:
+        interrupt_checkpoint()
         if time.monotonic() >= deadline:
             raise DeploymentError(f"timed out waiting for {description} to reach {success_state}")
         resource = getter()
+        interrupt_checkpoint()
         now = time.monotonic()
         state = lifecycle_value(resource, description)
         elapsed = int(now - started)
@@ -1674,6 +1681,9 @@ def cleanup_bucket(args, oci, state, namespace, bucket):
             "refusing bucket cleanup before image and instance are ready"
         )
     abort_multipart_uploads(oci, namespace, bucket)
+    bucket_record = state.data.get("resources", {}).get("bucket", {})
+    if bucket_record.get("created") is True:
+        delete_preauthenticated_requests(oci, namespace, bucket)
     objects = bucket_object_names(oci, namespace, bucket)
     if objects:
         raise DeploymentError(
@@ -1751,6 +1761,52 @@ def abort_multipart_uploads(oci, namespace, bucket):
                 name,
                 "--upload-id",
                 upload_id,
+                "--force",
+            ],
+            empty_data={},
+        )
+
+
+def delete_preauthenticated_requests(oci, namespace, bucket):
+    requests = response_data(
+        oci.run(
+            [
+                "os",
+                "preauth-request",
+                "list",
+                "--namespace",
+                namespace,
+                "--bucket-name",
+                bucket,
+                "--all",
+            ],
+            empty_data=[],
+        ),
+        list,
+        "pre-authenticated request list response",
+    )
+    for request in requests:
+        if not isinstance(request, dict):
+            raise DeploymentError(
+                "pre-authenticated request list response has an invalid request"
+            )
+        request_id = request.get("id")
+        if not isinstance(request_id, str):
+            raise DeploymentError("pre-authenticated request lacks an ID")
+        name = request.get("name")
+        description = name if isinstance(name, str) else request_id
+        print_status("CLEAN", f"Deleting pre-authenticated request {description}")
+        oci.run(
+            [
+                "os",
+                "preauth-request",
+                "delete",
+                "--namespace",
+                namespace,
+                "--bucket-name",
+                bucket,
+                "--par-id",
+                request_id,
                 "--force",
             ],
             empty_data={},
@@ -1877,6 +1933,8 @@ def clean_bucket(oci, state, resources, namespace):
         state.resource("bucket", deleted=True)
         return
     abort_multipart_uploads(oci, namespace, name)
+    if bucket.get("created") is True:
+        delete_preauthenticated_requests(oci, namespace, name)
     objects = bucket_object_names(oci, namespace, name)
     if objects:
         raise DeploymentError(
@@ -1905,6 +1963,7 @@ def clean_deployment(args):
     if shutil.which("oci") is None:
         raise DeploymentError("required program not found: oci")
     state = StateFile(args.state_file, resume=True)
+    install_signal_handlers(state)
     oci = OCIRunner(args.profile, args.config_file, args.region, args.verbose)
     resources = state.data.get("resources", {})
     if not isinstance(resources, dict):
@@ -2104,11 +2163,34 @@ def validate_resume(state, inputs, image_sha256):
         raise DeploymentError("verified release does not match the recorded deployment")
 
 
+def interrupt_checkpoint():
+    global _PENDING_SIGNAL
+    if _PENDING_SIGNAL is None:
+        return
+    signum = _PENDING_SIGNAL
+    _PENDING_SIGNAL = None
+    error = DeploymentError(f"interrupted by signal {signum}")
+    if _INTERRUPT_STATE is not None:
+        _INTERRUPT_STATE.record_failure(error)
+    raise KeyboardInterrupt
+
+
 def install_signal_handlers(state):
+    global _INTERRUPT_STATE, _PENDING_SIGNAL
+    _INTERRUPT_STATE = state
+    _PENDING_SIGNAL = None
+
     def stop(signum, _frame):
-        error = DeploymentError(f"interrupted by signal {signum}")
-        state.record_failure(error)
-        raise KeyboardInterrupt
+        global _PENDING_SIGNAL
+        if _PENDING_SIGNAL is not None:
+            interrupt_checkpoint()
+        _PENDING_SIGNAL = signum
+        print_status(
+            "WARNING",
+            "interrupt requested; waiting for the active OCI command to finish "
+            "and save its state (press Ctrl-C again to stop immediately)",
+            stream=sys.stderr,
+        )
 
     signal.signal(signal.SIGINT, stop)
     signal.signal(signal.SIGTERM, stop)

@@ -593,6 +593,7 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(command[:4], ["oci", "os", "ns", "get"])
         self.assertIn("--profile", command)
         self.assertNotIn("shell", invoked.call_args.kwargs)
+        self.assertTrue(invoked.call_args.kwargs["start_new_session"])
 
     def test_runner_rejects_invalid_json(self):
         completed = subprocess.CompletedProcess([], 0, "not-json", "")
@@ -627,6 +628,41 @@ class RunnerTests(unittest.TestCase):
         forbidden = deploy.OCIError([], 1, "ServiceError: 403 NotAllowed")
         self.assertTrue(missing.not_found)
         self.assertFalse(forbidden.not_found)
+
+
+class SignalHandlingTests(unittest.TestCase):
+    def test_first_interrupt_waits_for_and_persists_next_checkpoint(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            state_path = Path(temporary) / "state.json"
+            state = deploy.StateFile(state_path)
+            handlers = {}
+
+            def capture(signum, handler):
+                handlers[signum] = handler
+
+            with mock.patch.object(deploy.signal, "signal", side_effect=capture):
+                deploy.install_signal_handlers(state)
+            handlers[deploy.signal.SIGINT](deploy.signal.SIGINT, None)
+            with self.assertRaises(KeyboardInterrupt):
+                state.update(phase="checkpointed")
+
+            saved = json.loads(state_path.read_text())
+            self.assertEqual(saved["phase"], "checkpointed")
+            self.assertEqual(saved["failure"]["message"], "interrupted by signal 2")
+
+    def test_second_interrupt_stops_immediately(self):
+        state = mock.Mock()
+        handlers = {}
+        with mock.patch.object(
+            deploy.signal,
+            "signal",
+            side_effect=lambda signum, handler: handlers.setdefault(signum, handler),
+        ):
+            deploy.install_signal_handlers(state)
+        handlers[deploy.signal.SIGINT](deploy.signal.SIGINT, None)
+        with self.assertRaises(KeyboardInterrupt):
+            handlers[deploy.signal.SIGINT](deploy.signal.SIGINT, None)
+        state.record_failure.assert_called_once()
 
 
 class ShapeAndLifecycleTests(unittest.TestCase):
@@ -950,6 +986,7 @@ class ObjectSafetyTests(unittest.TestCase):
             {
                 "deployment_id": str(deploy.uuid.uuid4()),
                 "resources": {
+                    "bucket": {"created": True},
                     "image": {"lifecycle_state": "AVAILABLE"},
                     "instance": {"lifecycle_state": "RUNNING"},
                 },
@@ -958,14 +995,15 @@ class ObjectSafetyTests(unittest.TestCase):
         oci = SequenceOCI(
             [
                 {"data": []},
+                {"data": []},
                 {"data": {"objects": []}},
                 {},
                 deploy.OCIError([], 1, "ServiceError: 404 NotAuthorizedOrNotFound"),
             ]
         )
         deploy.cleanup_bucket(args, oci, state, "ns", "bucket")
-        self.assertEqual(oci.calls[2][0][:3], ["os", "bucket", "delete"])
-        self.assertEqual(oci.calls[2][1], {"empty_data": {}})
+        self.assertEqual(oci.calls[3][0][:3], ["os", "bucket", "delete"])
+        self.assertEqual(oci.calls[3][1], {"empty_data": {}})
         self.assertTrue(state.data["resources"]["bucket"]["deleted"])
 
     def test_bucket_cleanup_refuses_non_empty_bucket(self):
@@ -985,6 +1023,35 @@ class ObjectSafetyTests(unittest.TestCase):
         with self.assertRaisesRegex(deploy.DeploymentError, "non-empty bucket"):
             deploy.cleanup_bucket(args, oci, state, "ns", "bucket")
 
+    def test_created_bucket_cleanup_deletes_preauthenticated_requests(self):
+        args = mock.Mock(cleanup_bucket=True)
+        state = FakeState(
+            {
+                "deployment_id": str(deploy.uuid.uuid4()),
+                "resources": {
+                    "bucket": {"created": True},
+                    "image": {"lifecycle_state": "AVAILABLE"},
+                    "instance": {"lifecycle_state": "RUNNING"},
+                },
+            }
+        )
+        oci = SequenceOCI(
+            [
+                {"data": []},
+                {"data": [{"id": "par-id", "name": "image import"}]},
+                {},
+                {"data": {"objects": []}},
+                {},
+                deploy.OCIError([], 1, "ServiceError: 404 NotAuthorizedOrNotFound"),
+            ]
+        )
+        deploy.cleanup_bucket(args, oci, state, "ns", "bucket")
+        commands = [call[0] for call in oci.calls]
+        self.assertEqual(commands[1][:3], ["os", "preauth-request", "list"])
+        self.assertEqual(commands[2][:3], ["os", "preauth-request", "delete"])
+        self.assertIn("par-id", commands[2])
+        self.assertTrue(state.data["resources"]["bucket"]["deleted"])
+
     def test_bucket_object_names_accepts_bare_empty_list_response(self):
         oci = SequenceOCI([{"prefixes": []}])
         self.assertEqual(deploy.bucket_object_names(oci, "ns", "bucket"), [])
@@ -1001,7 +1068,11 @@ class CleanDeploymentTests(unittest.TestCase):
                     "updated_at": "2026-01-01T00:00:00Z",
                     "phase": "failed",
                     "resources": {
-                        "bucket": {"namespace": "ns", "name": "bucket"},
+                        "bucket": {
+                            "namespace": "ns",
+                            "name": "bucket",
+                            "created": True,
+                        },
                         "object": {
                             "namespace": "ns",
                             "bucket": "bucket",
@@ -1060,6 +1131,8 @@ class CleanDeploymentTests(unittest.TestCase):
                         ]
                     },
                     {},
+                    {"data": [{"id": "par-id", "name": "image import"}]},
+                    {},
                     {"data": {"objects": []}},
                     {},
                     deploy.OCIError([], 1, "ServiceError: 404 NotAuthorizedOrNotFound"),
@@ -1077,7 +1150,74 @@ class CleanDeploymentTests(unittest.TestCase):
         self.assertEqual(commands[7][:3], ["os", "object", "delete"])
         self.assertEqual(commands[10][:3], ["os", "multipart", "list"])
         self.assertEqual(commands[11][:3], ["os", "multipart", "abort"])
-        self.assertEqual(commands[13][:3], ["os", "bucket", "delete"])
+        self.assertEqual(commands[12][:3], ["os", "preauth-request", "list"])
+        self.assertEqual(commands[13][:3], ["os", "preauth-request", "delete"])
+        self.assertEqual(commands[15][:3], ["os", "bucket", "delete"])
+
+    def test_clean_deployment_resumes_after_object_was_already_deleted(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            state_path = Path(temporary) / "state.json"
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": deploy.STATE_SCHEMA_VERSION,
+                        "deployment_id": str(deploy.uuid.uuid4()),
+                        "created_at": "2026-01-01T00:00:00Z",
+                        "updated_at": "2026-01-01T00:00:00Z",
+                        "phase": "object-ready",
+                        "resources": {
+                            "bucket": {
+                                "namespace": "ns",
+                                "name": "bucket",
+                                "created": True,
+                            },
+                            "object": {
+                                "namespace": "ns",
+                                "bucket": "bucket",
+                                "name": "image.qcow2",
+                                "uploaded": True,
+                                "deleted": True,
+                            },
+                        },
+                    }
+                )
+            )
+            args = mock.Mock(
+                state_file=state_path,
+                profile="DEFAULT",
+                config_file=None,
+                region=None,
+                verbose=False,
+                instance_timeout=30,
+                image_timeout=30,
+            )
+            oci = SequenceOCI(
+                [
+                    {
+                        "data": {
+                            "public-access-type": "NoPublicAccess",
+                            "storage-tier": "Standard",
+                        }
+                    },
+                    {"data": []},
+                    {"data": [{"id": "par-id", "name": "interrupted import"}]},
+                    {},
+                    {"data": {"objects": []}},
+                    {},
+                    deploy.OCIError([], 1, "ServiceError: 404 NotAuthorizedOrNotFound"),
+                ]
+            )
+            with (
+                mock.patch.object(deploy.shutil, "which", return_value="/usr/bin/oci"),
+                mock.patch.object(deploy, "OCIRunner", return_value=oci),
+            ):
+                self.assertEqual(deploy.clean_deployment(args), 0)
+            self.assertFalse(state_path.exists())
+        commands = [call[0] for call in oci.calls]
+        self.assertNotIn(["os", "object", "delete"], [command[:3] for command in commands])
+        self.assertEqual(commands[2][:3], ["os", "preauth-request", "list"])
+        self.assertEqual(commands[3][:3], ["os", "preauth-request", "delete"])
+        self.assertEqual(commands[5][:3], ["os", "bucket", "delete"])
 
 
 class MutationCommandTests(unittest.TestCase):
